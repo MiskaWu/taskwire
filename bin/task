@@ -26,6 +26,12 @@
 
 set -euo pipefail
 
+# 設定的單一真相來源：~/.config/taskwire/config.env（見 taskwire-config.sh）。
+# readlink -f 不能省——這支腳本是 symlink 進 ~/.local/bin/ 的。
+_TW_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+# shellcheck source=taskwire-config.sh
+[ -f "$_TW_DIR/taskwire-config.sh" ] && . "$_TW_DIR/taskwire-config.sh"
+
 # 路徑前面**必須帶主機名**。只給 `<group>/<repo>` 的話 glab 會打 gitlab.com ——
 # 它只有在 repo 目錄內才靠 git remote 推斷主機，而這支腳本要能從任何目錄跑。
 # 少了主機名的症狀是 404／401，不是「找不到指令」。
