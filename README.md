@@ -11,6 +11,7 @@
 | `bin/task` | 指令列入口。標籤狀態機 v2：收集（無標籤）→ todo → doing → done → 關單，旁支 blocked。**只包含代理被允許的動作**——拉 todo（授權）與關單（驗收）刻意沒有指令。 |
 | `bin/task-webhookd` | 常駐門鈴（:9587）。驗 GitLab signing token（Standard Webhooks 簽章），issue／work item／note 事件叫醒 dispatch。**門鈴不是資料來源**：payload 不進決策。 |
 | `bin/task-dispatch` | 無頭取件器。`flock` 防重入；`task next` 取件；起 `claude -p` 照協定做；退出後機械兜底——單子停在 doing 就補 block，永不留下「看起來有人在做、其實沒人在做」。 |
+| `bin/task-notify` | 系統級通知管道：Discord 推播（`~/.config/taskwire/discord-webhook`，選配）＋ GitLab「🤖 taskwire 系統健康」卡留痕掛 blocked。憑證失效、token 到期等異常都走這裡。 |
 | `systemd/` | user units：`task-webhook.service`（常駐）、`task-scan.timer`（每小時對帳，K8s 式 periodic resync，`Persistent=true`）。 |
 
 ## 安裝（新機器）

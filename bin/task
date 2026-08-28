@@ -238,6 +238,25 @@ cmd_doctor() {
     printf 'token      查不到到期日（缺 Personal Access Token: Read 權限）\n'
   fi
 
+  # 無頭側的 CLI 憑證（訂閱 OAuth）。accessToken 短命且 refresh 會救，
+  # 只把「檔案不存在」與「落後 48h 未刷新」當異常——跟 dispatch 預檢同一套判準。
+  local creds="$HOME/.claude/.credentials.json" exp_ms age
+  if [ ! -f "$creds" ]; then
+    printf '無頭憑證   找不到 %s —— 跑 claude /login\n' "$creds"
+  else
+    exp_ms=$(jq -r '[.. | .expiresAt? | select(. != null)] | first // empty' "$creds" 2>/dev/null || true)
+    if [ -z "$exp_ms" ]; then
+      printf '無頭憑證   檔案在，讀不出到期欄位（CLI 格式可能改了，靠事後判定）\n'
+    else
+      age=$(( $(date +%s) - exp_ms / 1000 ))
+      if [ "$age" -gt 172800 ]; then
+        printf '無頭憑證   已 %s 天沒成功刷新   ← 可能失效，跑 claude /login\n' "$(( age / 86400 ))"
+      else
+        printf '無頭憑證   正常（refresh 活著）\n'
+      fi
+    fi
+  fi
+
   local have missing=""
   have=$(glab label list -R "$REPO" 2>&1) || { printf '標籤       讀不到：%s\n' "$have"; have=""; ok=0; }
   for l in "${FLOW_LABELS[@]}"; do
