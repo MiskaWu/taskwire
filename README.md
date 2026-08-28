@@ -9,8 +9,8 @@
 | 檔案 | 角色 |
 |---|---|
 | `bin/task` | 指令列入口。標籤狀態機 v2：收集（無標籤）→ todo → doing → done → 關單，旁支 blocked。**只包含代理被允許的動作**——拉 todo（授權）與關單（驗收）刻意沒有指令。 |
-| `bin/task-webhookd` | 常駐門鈴（:9587）。驗 GitLab signing token（Standard Webhooks 簽章），issue／work item／note 事件叫醒 dispatch。**門鈴不是資料來源**：payload 不進決策。 |
-| `bin/task-dispatch` | 無頭取件器。`flock` 防重入；`task next` 取件；起 `claude -p` 照協定做；退出後機械兜底——單子停在 doing 就補 block，永不留下「看起來有人在做、其實沒人在做」。 |
+| `bin/task-webhookd` | 門鈴（:9587）。驗 GitLab signing token（Standard Webhooks 簽章）後**往門鈴信箱投紙條**——它不再起任何子行程，全部能力就是按鈴（一個位元），因此跑在 podman 容器裡（quadlet，`Containerfile.webhook`，只掛密鑰唯讀＋信箱可寫）。起 dispatch 歸 `task-doorbell.path`（systemd 盯信箱）。沒設密鑰時 ConditionPathExists 讓它安靜不啟動，機器退化成純輪巡模式。 |
+| `bin/task-dispatch` | 無頭取件器。`flock` 防重入；`task next` 取件；起 `claude -p` 照協定做；退出後機械兜底——單子停在 doing 就補 block，永不留下「看起來有人在做、其實沒人在做」。開場先收門鈴信箱（在搶鎖之前）。 |
 | `bin/task-notify` | 系統級通知管道：Discord 推播（`~/.config/taskwire/discord-webhook`，選配）＋ GitLab「🤖 taskwire 系統健康」卡留痕掛 blocked。憑證失效、token 到期等異常都走這裡。 |
 | `bin/task-ui` | 本機控制台（127.0.0.1:9588）。設定、密鑰、服務與排程、log、通知測試，加上**唯讀**的單況。拉 todo 與關單刻意沒有按鈕——理由跟 `bin/task` 裡沒有那兩個指令是同一個。頁面在 `ui/index.html`。 |
 | `bin/taskwire-config.sh`<br>`bin/taskwire_config.py` | 設定的單一真相（`~/.config/taskwire/config.env`）。bash 與 python 兩份實作同義，優先序都是**環境變數 > config.env > 內建預設**。旋鈕的目錄在 `taskwire_config.py` 的 `SETTINGS`，控制台的表單由它長出來。 |

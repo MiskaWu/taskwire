@@ -18,6 +18,12 @@
 4. **webhook 是門鈴，不是資料來源**。payload 不進決策；dispatch 是 level-triggered，
    每次醒來用 `task next` 重讀完整真實狀態。K8s reconcile 的形：標籤=期望狀態、
    dispatch=controller、webhook=提早叫醒、`task-scan.timer`=periodic resync。
+   （2026-08-28 門鈴改造）門鈴現在**物理上**只剩一個位元：webhookd 驗簽後往
+   `~/.local/state/taskwire/doorbell/` 投紙條，起 dispatch 歸 `task-doorbell.path`；
+   dispatch 開場收信（在搶 flock **之前**收，否則 path unit 會空轉）。
+   因此 webhookd 可以乾淨容器化（現行部署：quadlet，只掛密鑰 ro＋信箱 rw）。
+   沒設密鑰的機器門鈴不啟動（ConditionPathExists 安靜跳過），只剩每小時輪巡——
+   這是允許的降級模式，慢但不漏。
 5. **兩層寫回**：協定層歸模型（提示教它 done/block），兜底層歸機械
    （dispatch 退出後單子還在 doing 就補 block）。兜底不能刪——它保證單子永遠不會
    停在「看起來有人在做、其實沒人在做」。
@@ -41,7 +47,8 @@
 |---|---|---|
 | `bin/task` `task-notify` | symlink 進 `~/.local/bin/`，改即生效 | `bash -n` 檢查 |
 | `bin/task-dispatch` `task-digest` | 由 systemd／webhookd 以絕對路徑呼叫，改即生效 | `bash -n` |
-| `bin/task-webhookd` | `task-webhook.service` 常駐（:9587） | `python3 -m py_compile` 後 `systemctl --user restart task-webhook` |
+| `bin/task-webhookd` | **quadlet 容器**（taskwire-webhook 映像，:9587；程式 COPY 進映像） | `py_compile` → `podman build -t taskwire-webhook:latest -f Containerfile.webhook .` → `systemctl --user restart task-webhook` |
+| `systemd/task-doorbell.path` `task-dispatch.service` | 門鈴信箱監看＋dispatch 的 unit 形（`task-scan.timer` 也指向後者） | `cp` → `daemon-reload` |
 | `bin/task-ui` `ui/index.html` | `task-ui.service` 常駐（127.0.0.1:9588） | `python3 -m py_compile` 後 `systemctl --user restart task-ui`；改頁面不用重啟 |
 | `bin/taskwire-config.sh` `taskwire_config.py` | 被上面各支 source／import，改即生效 | `bash -n`／`py_compile` |
 | `systemd/*` | **複本**在 `~/.config/systemd/user/`，repo 是源 | `cp` 過去 → `daemon-reload` → restart／re-enable |
@@ -87,3 +94,7 @@ Standard Webhooks 格式（`<webhook-id>.<webhook-timestamp>.<body>` 的 HMAC-SH
   `task-ui` 的 `systemd_available()` 會自動探這兩條路，別把它簡化掉。
 - 容器內 `journalctl` 說 No journal files found，八成是缺 `/etc/machine-id`——
   journalctl 靠它定位 `/var/log/journal/<machine-id>/`，只掛 journal 目錄不夠。
+- 單檔 bind mount 遇上「tmp 檔寫好再 os.replace」的原子換檔會**留在舊 inode**：
+  UI 重產 webhook 密鑰後，門鈴容器讀到的還是舊密鑰，必須 restart（UI 存檔後會提示）。
+- quadlet 生成的 unit（UnitFileState=generated）不吃 `systemctl enable/disable`，
+  開機自啟由 `.container` 的 `[Install]` 決定；控制台對這類 unit 不顯示自啟按鈕。
