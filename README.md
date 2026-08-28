@@ -14,19 +14,22 @@
 | `bin/task-notify` | 系統級通知管道：Discord 推播（`~/.config/taskwire/discord-webhook`，選配）＋ GitLab「🤖 taskwire 系統健康」卡留痕掛 blocked。憑證失效、token 到期等異常都走這裡。 |
 | `bin/task-ui` | 本機控制台（127.0.0.1:9588）。設定、密鑰、服務與排程、log、通知測試，加上**唯讀**的單況。拉 todo 與關單刻意沒有按鈕——理由跟 `bin/task` 裡沒有那兩個指令是同一個。頁面在 `ui/index.html`。 |
 | `bin/taskwire-config.sh`<br>`bin/taskwire_config.py` | 設定的單一真相（`~/.config/taskwire/config.env`）。bash 與 python 兩份實作同義，優先序都是**環境變數 > config.env > 內建預設**。旋鈕的目錄在 `taskwire_config.py` 的 `SETTINGS`，控制台的表單由它長出來。 |
+| `bin/taskwire-install` | 檔案腳印的單一清單。`install`（冪等就位）、`status`（逐項對帳）、`uninstall`（照表拆光，設定與狀態預設保留）。 |
 | `systemd/` | user units：`task-webhook.service`、`task-ui.service`（兩個常駐）、`task-scan.timer`（每小時對帳，K8s 式 periodic resync，`Persistent=true`）、`task-digest.timer`（每日日報）。另有 `task-ui.container`（podman quadlet，與 `task-ui.service` 二選一）。 |
 
 ## 安裝（新機器）
 
 ```sh
-ln -sf ~/projects/taskwire/bin/task ~/.local/bin/task
-mkdir -p ~/.config/taskwire ~/.local/state/taskwire
+./bin/taskwire-install install    # symlink、unit 複本、quadlet、skill link 一次就位（冪等）
 # 密鑰：openssl rand -hex 32 > ~/.config/taskwire/webhook-secret && chmod 600 同檔
-cp systemd/*.service systemd/*.timer ~/.config/systemd/user/
-systemctl --user daemon-reload
-systemctl --user enable --now task-webhook.service task-ui.service task-scan.timer task-digest.timer
+#（或裝完在控制台 http://127.0.0.1:9588/ 的密鑰區按「重新產生」）
 task doctor
 ```
+
+腳印的完整清單就在 `bin/taskwire-install` 開頭的表裡；`taskwire-install status`
+逐項對帳（含 unit 複本與 repo 分岔的偵測），`taskwire-install uninstall` 照表拆光
+（設定與狀態預設保留，`--purge` 才刪）。門鈴預設走 podman quadlet，
+機器上沒有 podman 會自動退回直跑 unit。
 
 裝完開 <http://127.0.0.1:9588/>，其餘設定在頁面上轉。設定寫進
 `~/.config/taskwire/config.env`；排程改動寫成 systemd drop-in，
