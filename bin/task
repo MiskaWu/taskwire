@@ -290,11 +290,13 @@ main() {
     block)          _need_iid "${1:-}" block
                     [ -n "${2:-}" ] || die '要寫清楚卡在哪：task block <iid> "問題"'
                     _note "$1" "$2" >/dev/null
-                    _set_state "$1" blocked ;;
+                    _set_state "$1" blocked
+                    task-notify -d "球到你手上：#$1 卡住等回話——$2" >/dev/null 2>&1 || true ;;
     done)           _need_iid "${1:-}" done
                     [ -n "${2:-}" ] || die '要給交件摘要：task done <iid> "摘要"'
                     _note "$1" "$2" >/dev/null
-                    _set_state "$1" done ;;
+                    _set_state "$1" done
+                    task-notify -d "球到你手上：#$1 做完待驗收——$2" >/dev/null 2>&1 || true ;;
     note)           _need_iid "${1:-}" note
                     [ -n "${2:-}" ] || die '要給留言內容'
                     _note "$1" "$2" ;;
