@@ -1,0 +1,166 @@
+#!/usr/bin/env bash
+# taskwire-install —— 檔案腳印的單一清單（2026-08-28 拍板，解「檔案散亂」）。
+#
+# taskwire 在機器上的腳印刻意照 XDG 慣例分開放（程式歸 git、設定值得備份、
+# 狀態可拋棄），代價是「散」。這支腳本就是那張清單：腳印只在下面的表裡宣告,
+# install／status／uninstall 都照同一張表走——要加腳印就加表，不加散裝指令。
+#
+#   taskwire-install install     全部就位（冪等，重跑無害）
+#   taskwire-install status      逐項對帳：在不在、指得對不對、複本有沒有分岔
+#   taskwire-install uninstall   照表反向拆光；設定與狀態預設保留（--purge 才刪）
+#   任一動作加 -n 只印不做
+#
+# 門鈴預設走 quadlet 容器（現行部署）；機器上沒有 podman 就退回直跑 unit。
+set -uo pipefail
+
+REPO_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+BIN_DIR="$HOME/.local/bin"
+SYSD="$HOME/.config/systemd/user"
+QUAD="$HOME/.config/containers/systemd"
+SKILL_LINK="$HOME/.claude/skills/taskwire"
+
+# ══ 腳印清單（唯一真相）══
+SYMLINKS=(task task-notify taskwire-install)          # → $BIN_DIR，指回 repo/bin
+UNIT_COPIES=(task-ui.service task-dispatch.service task-doorbell.path
+             task-scan.timer task-digest.service task-digest.timer)
+QUADLETS=(task-webhook.container)                     # podman 路線
+FALLBACK_UNITS=(task-webhook.service)                 # 沒 podman 才用的直跑版
+ENABLE_UNITS=(task-ui.service task-doorbell.path task-scan.timer task-digest.timer)
+START_ONLY=(task-webhook.service)   # quadlet 生成的 unit 不吃 enable，只 start
+DATA_DIRS=("$HOME/.config/taskwire" "$HOME/.local/state/taskwire")
+IMAGE=localhost/taskwire-webhook:latest
+
+DRY=0
+run() { if [ "$DRY" -eq 1 ]; then printf '  （dry-run）%s\n' "$*"; else "$@"; fi; }
+have_podman() { command -v podman >/dev/null 2>&1; }
+
+cmd_install() {
+  echo "▸ 資料目錄"
+  for d in "${DATA_DIRS[@]}"; do run mkdir -p "$d"; done
+  echo "▸ 指令 symlink → $BIN_DIR"
+  run mkdir -p "$BIN_DIR"
+  for name in "${SYMLINKS[@]}"; do run ln -sfn "$REPO_DIR/bin/$name" "$BIN_DIR/$name"; done
+  echo "▸ skill symlink → $SKILL_LINK"
+  run mkdir -p "$(dirname "$SKILL_LINK")"
+  run ln -sfn "$REPO_DIR/skill" "$SKILL_LINK"
+  echo "▸ systemd unit 複本 → $SYSD（drop-in 不會被動到）"
+  run mkdir -p "$SYSD"
+  local changed=0
+  for u in "${UNIT_COPIES[@]}"; do
+    if ! cmp -s "$REPO_DIR/systemd/$u" "$SYSD/$u" 2>/dev/null; then
+      run cp "$REPO_DIR/systemd/$u" "$SYSD/$u"; changed=1
+    fi
+  done
+  if have_podman; then
+    echo "▸ 門鈴走 quadlet（podman）"
+    run mkdir -p "$QUAD"
+    for q in "${QUADLETS[@]}"; do
+      cmp -s "$REPO_DIR/systemd/$q" "$QUAD/$q" 2>/dev/null || { run cp "$REPO_DIR/systemd/$q" "$QUAD/$q"; changed=1; }
+    done
+    run rm -f "$SYSD/task-webhook.service"    # 二選一：退掉直跑版
+    if ! podman image exists "$IMAGE" 2>/dev/null; then
+      echo "▸ build 門鈴映像（首次）"
+      run podman build -t "$IMAGE" -f "$REPO_DIR/Containerfile.webhook" "$REPO_DIR" \
+        || echo "  ⚠ build 失敗——門鈴起不來，先跑其餘部分，之後手動重 build"
+    fi
+  else
+    echo "▸ 沒有 podman：門鈴用直跑 unit"
+    for u in "${FALLBACK_UNITS[@]}"; do
+      cmp -s "$REPO_DIR/systemd/$u" "$SYSD/$u" 2>/dev/null || { run cp "$REPO_DIR/systemd/$u" "$SYSD/$u"; changed=1; }
+    done
+  fi
+  [ "$changed" -eq 1 ] || [ "$DRY" -eq 1 ] && run systemctl --user daemon-reload
+  echo "▸ 啟用服務"
+  run systemctl --user enable --now "${ENABLE_UNITS[@]}"
+  # 門鈴：沒設密鑰時 ConditionPathExists 會讓 start 安靜跳過，這是設計。
+  run systemctl --user start "${START_ONLY[@]}" || true
+  echo "完成。對帳：taskwire-install status；控制台：http://127.0.0.1:9588/"
+}
+
+_row() { printf '  %-6s %-44s %s\n' "$1" "$2" "$3"; }
+
+cmd_status() {
+  local bad=0
+  echo "repo：$REPO_DIR"
+  echo "▸ 指令 symlink"
+  for name in "${SYMLINKS[@]}"; do
+    local p="$BIN_DIR/$name" want="$REPO_DIR/bin/$name"
+    if [ "$(readlink "$p" 2>/dev/null)" = "$want" ]; then _row ok "$p" "→ repo"
+    elif [ -e "$p" ]; then _row '⚠' "$p" "存在但不是指回 repo 的 symlink"; bad=1
+    else _row 缺 "$p" ""; bad=1; fi
+  done
+  echo "▸ skill symlink"
+  if [ "$(readlink "$SKILL_LINK" 2>/dev/null)" = "$REPO_DIR/skill" ]; then _row ok "$SKILL_LINK" "→ repo"
+  else _row '⚠' "$SKILL_LINK" "缺或指錯"; bad=1; fi
+  echo "▸ unit 複本（repo 是出廠值）"
+  for u in "${UNIT_COPIES[@]}"; do
+    if [ ! -f "$SYSD/$u" ]; then _row 缺 "$SYSD/$u" ""; bad=1
+    elif cmp -s "$REPO_DIR/systemd/$u" "$SYSD/$u"; then _row ok "$u" "與 repo 一致"
+    else _row '⚠' "$u" "與 repo 分岔——看 diff 決定 cp 哪邊"; bad=1; fi
+  done
+  echo "▸ 排程 drop-in（使用者調的值，install 不會動）"
+  local found=0 d
+  for d in "$SYSD"/task-*.d; do
+    [ -d "$d" ] || continue; found=1
+    _row 有 "$d" "$(ls "$d" | tr '\n' ' ')"
+  done
+  [ "$found" -eq 0 ] && _row 無 "（全部照出廠排程）" ""
+  echo "▸ 門鈴部署"
+  if have_podman; then
+    [ -f "$QUAD/task-webhook.container" ] && _row ok "quadlet" "$QUAD/task-webhook.container" \
+      || { _row 缺 "quadlet" "$QUAD/task-webhook.container"; bad=1; }
+    podman image exists "$IMAGE" 2>/dev/null && _row ok "映像" "$IMAGE" \
+      || { _row 缺 "映像" "跑 install 會 build"; bad=1; }
+  else
+    [ -f "$SYSD/task-webhook.service" ] && _row ok "直跑" "$SYSD/task-webhook.service" \
+      || { _row 缺 "直跑" "$SYSD/task-webhook.service"; bad=1; }
+  fi
+  echo "▸ 資料"
+  for d in "${DATA_DIRS[@]}"; do [ -d "$d" ] && _row ok "$d" "" || _row 缺 "$d" ""; done
+  [ -s "$HOME/.config/taskwire/webhook-secret" ] && _row ok "webhook-secret" "已設定" \
+    || _row 無 "webhook-secret" "門鈴不會啟動（設計），只剩每小時輪巡"
+  echo "▸ 服務"
+  for u in "${ENABLE_UNITS[@]}" "${START_ONLY[@]}"; do
+    _row "$(systemctl --user is-active "$u" 2>/dev/null || echo '?')" "$u" \
+         "$(systemctl --user show "$u" --property=UnitFileState --value 2>/dev/null)"
+  done
+  return "$bad"
+}
+
+cmd_uninstall() {
+  echo "▸ 停用服務"
+  run systemctl --user disable --now "${ENABLE_UNITS[@]}" 2>/dev/null || true
+  run systemctl --user stop "${START_ONLY[@]}" 2>/dev/null || true
+  echo "▸ 移除 unit 複本、quadlet 與 drop-in"
+  for u in "${UNIT_COPIES[@]}" "${FALLBACK_UNITS[@]}"; do
+    run rm -f "$SYSD/$u"
+    [ -d "$SYSD/$u.d" ] && run rm -rf "$SYSD/$u.d"
+  done
+  for q in "${QUADLETS[@]}"; do run rm -f "$QUAD/$q"; done
+  run systemctl --user daemon-reload
+  echo "▸ 移除 symlink"
+  for name in "${SYMLINKS[@]}"; do
+    [ "$(readlink "$BIN_DIR/$name" 2>/dev/null)" = "$REPO_DIR/bin/$name" ] && run rm -f "$BIN_DIR/$name"
+  done
+  [ "$(readlink "$SKILL_LINK" 2>/dev/null)" = "$REPO_DIR/skill" ] && run rm -f "$SKILL_LINK"
+  if [ "${1:-}" = "--purge" ]; then
+    echo "▸ --purge：連設定（含密鑰）、狀態、映像一起刪"
+    for d in "${DATA_DIRS[@]}"; do run rm -rf "$d"; done
+    have_podman && run podman rmi "$IMAGE" 2>/dev/null || true
+  else
+    echo "保留設定與狀態：${DATA_DIRS[*]}（要清就 uninstall --purge）"
+  fi
+  echo "完成。repo 本身（$REPO_DIR）不動。"
+}
+
+main() {
+  local cmd="${1:-status}"; shift || true
+  [ "${1:-}" = "-n" ] && { DRY=1; shift; }
+  case "$cmd" in
+    install)   cmd_install ;;
+    status)    cmd_status ;;
+    uninstall) cmd_uninstall "${1:-}" ;;
+    *) echo "用法：taskwire-install install|status|uninstall [--purge] [-n]"; exit 1 ;;
+  esac
+}
+main "$@"

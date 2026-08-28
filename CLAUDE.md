@@ -51,6 +51,7 @@
 | `systemd/task-doorbell.path` `task-dispatch.service` | 門鈴信箱監看＋dispatch 的 unit 形（`task-scan.timer` 也指向後者） | `cp` → `daemon-reload` |
 | `bin/task-ui` `ui/index.html` | `task-ui.service` 常駐（127.0.0.1:9588） | `python3 -m py_compile` 後 `systemctl --user restart task-ui`；改頁面不用重啟 |
 | `bin/taskwire-config.sh` `taskwire_config.py` | 被上面各支 source／import，改即生效 | `bash -n`／`py_compile` |
+| `bin/taskwire-install` | 檔案腳印的單一清單：install／status／uninstall（symlink、unit 複本、quadlet、skill link 一把管；uninstall 預設保留設定與狀態） | `bash -n`；要加腳印改腳本內的表 |
 | `systemd/*` | **複本**在 `~/.config/systemd/user/`，repo 是源 | `cp` 過去 → `daemon-reload` → restart／re-enable |
 | `skill/SKILL.md` | symlink 於 `~/.claude/skills/taskwire`，改即生效 | — |
 
