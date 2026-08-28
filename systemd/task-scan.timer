@@ -1,0 +1,12 @@
+# 可選：webhook 漏接的對帳保底。要用才開：
+#   systemctl --user enable --now task-scan.timer
+# Persistent=true 是 WSL2 的命脈：機器睡過排程點，醒來補跑（journal 踩過的坑）。
+[Unit]
+Description=backlog 對帳輪詢 timer（可選，預設不啟用）
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+
+[Install]
+WantedBy=timers.target

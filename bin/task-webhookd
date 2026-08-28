@@ -1,0 +1,174 @@
+#!/usr/bin/env python3
+"""task-webhookd —— 接 GitLab webhook 的門鈴。
+
+設計原則：**webhook 是門鈴，不是資料來源。**
+這支服務收到 issue 事件後只做一件事：叫醒 task-dispatch，然後立刻回 200。
+它不解讀 payload 裡的細節——單子的真實狀態永遠由 dispatch 打 API 重新確認。
+好處：漏接事件不會壞資料（只是慢一拍，可選的對帳 timer 會補），
+重複事件天然冪等（dispatch 有 flock，忙碌中就跳過）。
+
+安全：優先驗 Webhook-Signature 標頭（GitLab 的 signing token——用密鑰對
+payload 做 HMAC-SHA256，密鑰本身不隨請求傳輸，在 http 環境下比明文 token
+實質安全）；沒有簽章標頭時退回驗 X-Gitlab-Token（切換期的備援）。
+密鑰共用同一份 ~/.config/taskwire/webhook-secret（0600），驗不過回 403。
+
+這是本機少數的常駐服務之一，由 systemd user unit（task-webhook.service）
+帶 Restart=always 看管。/healthz 給健康檢查用。
+
+例外於「不做常駐服務」的原則：機器常開、使用者拍板要 webhook（2026-08-27）。
+腳本語言用 python3 是跟 git-push-guard.py 同一個先例——
+純 bash 寫 HTTP 伺服器才是自找麻煩。
+"""
+
+import base64
+import binascii
+import hashlib
+import hmac
+import json
+import os
+import subprocess
+import sys
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+PORT = int(os.environ.get("TASK_WEBHOOK_PORT", "9587"))
+SECRET_FILE = os.path.expanduser("~/.config/taskwire/webhook-secret")
+DISPATCH = os.path.expanduser("~/projects/taskwire/bin/task-dispatch")
+LOG_DIR = os.path.expanduser("~/.local/state/taskwire")
+
+
+def log(msg: str) -> None:
+    # journalctl --user -u task-webhook 就看得到，不另開檔案。
+    print(msg, flush=True)
+
+
+def read_secret() -> str:
+    try:
+        with open(SECRET_FILE, encoding="utf-8") as fh:
+            return fh.read().strip()
+    except OSError:
+        return ""
+
+
+def _candidate_keys(secret: str) -> list:
+    """Standard Webhooks 的密鑰可能是原始字串，也可能是 whsec_ 前綴的 base64。
+    兩種都當候選，驗得過任一種就算通過——GitLab 產生器給哪種格式版本間有出入。"""
+    keys = [secret.encode()]
+    s = secret[6:] if secret.startswith("whsec_") else secret
+    try:
+        keys.append(base64.b64decode(s + "=" * (-len(s) % 4)))
+    except (ValueError, binascii.Error):
+        pass
+    return keys
+
+
+def verify_signature(secret: str, headers, body: bytes, sig_header: str) -> bool:
+    """Standard Webhooks（GitLab signing token 採用的規格）：
+    簽名內容是 "<webhook-id>.<webhook-timestamp>.<body>"，
+    HMAC-SHA256 後 base64，放在標頭裡以 "v1," 前綴、可有多組以空白分隔。
+    另保留舊假設（對 body 直接 HMAC 的十六進位）當相容路徑。"""
+    msg_id = headers.get("Webhook-Id", "")
+    ts = headers.get("Webhook-Timestamp", "")
+    signed = msg_id.encode() + b"." + ts.encode() + b"." + body
+    v1_sigs = [p.split(",", 1)[1] for p in sig_header.split() if p.startswith("v1,")]
+    for key in _candidate_keys(secret):
+        want = base64.b64encode(hmac.new(key, signed, hashlib.sha256).digest()).decode()
+        for got in v1_sigs:
+            if hmac.compare_digest(want, got):
+                return True
+    # 相容：純 hex、直接簽 body 的格式（本機自測與可能的舊版 GitLab）。
+    got_hex = sig_header.split("=", 1)[-1].strip().lower()
+    for key in _candidate_keys(secret):
+        if hmac.compare_digest(hmac.new(key, body, hashlib.sha256).hexdigest(), got_hex):
+            return True
+    return False
+
+
+class Handler(BaseHTTPRequestHandler):
+    # 預設的 log_message 會把每個請求寫 stderr，格式雜訊多，收斂成自己的。
+    def log_message(self, *_args) -> None:
+        pass
+
+    def _reply(self, code: int, body: str = "") -> None:
+        data = body.encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def do_GET(self) -> None:  # noqa: N802（BaseHTTPRequestHandler 的介面）
+        if self.path == "/healthz":
+            self._reply(200, "ok\n")
+        else:
+            self._reply(404)
+
+    def do_POST(self) -> None:  # noqa: N802
+        if self.path != "/hook":
+            self._reply(404)
+            return
+        secret = read_secret()
+        if not secret:
+            log("403 拒絕：本機沒有密鑰檔")
+            self._reply(403)
+            return
+        # 簽章要對 payload 算，所以先讀 body 再驗。
+        length = int(self.headers.get("Content-Length", "0") or "0")
+        body = self.rfile.read(min(length, 1 << 20))
+        sig = self.headers.get("Webhook-Signature", "")
+        tok = self.headers.get("X-Gitlab-Token", "")
+        if sig:
+            if not verify_signature(secret, self.headers, body, sig):
+                log(f"403 拒絕：簽章不符（來源 {self.client_address[0]}，標頭形如 {sig[:16]}…）")
+                self._reply(403)
+                return
+        elif tok:
+            # 切換期備援：舊的明文 token 驗證。
+            if not hmac.compare_digest(secret, tok):
+                log(f"403 拒絕：token 不符（來源 {self.client_address[0]}）")
+                self._reply(403)
+                return
+        else:
+            log(f"403 拒絕：沒帶任何驗證標頭（來源 {self.client_address[0]}）")
+            self._reply(403)
+            return
+        kind = ""
+        try:
+            kind = json.loads(body or b"{}").get("object_kind", "")
+        except json.JSONDecodeError:
+            pass
+        if kind not in ("issue", "work_item", "note"):
+            # 這版 GitLab 把 issue 統一叫 work item，事件的 object_kind 兩種都可能出現。
+            # note（留言）也當門鈴：使用者補驗收條件的動作就是留言，不響的話
+            # 補完得再去碰標籤才會動，彆扭。我們自己的上工／交件留言也會響，
+            # 但 dispatch 的 flock 與冪等取件天然消化。其餘事件（push…）收下不動作。
+            self._reply(200, "ignored\n")
+            return
+        # 叫醒 dispatch：detach、不等它、輸出交給它自己的 log。
+        # dispatch 忙碌中會被自己的 flock 擋掉，這裡永遠不用管重複。
+        os.makedirs(LOG_DIR, exist_ok=True)
+        with open(os.path.join(LOG_DIR, "dispatch.log"), "ab") as out:
+            subprocess.Popen(
+                [DISPATCH],
+                stdout=out,
+                stderr=out,
+                start_new_session=True,
+            )
+        log("issue 事件 → 已叫醒 dispatch")
+        self._reply(200, "ok\n")
+
+
+def main() -> int:
+    if not os.path.isfile(SECRET_FILE):
+        log(f"錯誤：找不到密鑰檔 {SECRET_FILE}，先跑安裝步驟。")
+        return 1
+    if not os.access(DISPATCH, os.X_OK):
+        log(f"錯誤：dispatch 不可執行：{DISPATCH}")
+        return 1
+    server = ThreadingHTTPServer(("", PORT), Handler)
+    log(f"task-webhookd 監聽 :{PORT}（/hook 收 issue 事件，/healthz 健康檢查）")
+    server.serve_forever()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
