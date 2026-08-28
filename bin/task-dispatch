@@ -39,6 +39,26 @@ iid=$(grep -oE '#[0-9]+' <<< "$next_out" | head -1 | tr -d '#') || true
 run_log="$STATE_DIR/run-$(date +%Y%m%d-%H%M%S)-$iid.log"
 echo "處理 #$iid，claude log → $run_log"
 
+# 憑證預檢（2-2A，保守版）：accessToken 過期是常態（refresh 會救），不能當失效訊號；
+# 只有「憑證檔不存在」或「到期時間已落後超過 48 小時」（代表很久沒有成功 refresh）
+# 才提早示警。示警不擋工——refresh 仍可能成功，真失敗由事後判定接手。
+_notify_auth() {
+  local stamp="$STATE_DIR/auth-notify.stamp"
+  # 6 小時內不重複吵（timer 每小時都會跑到這裡）
+  if [ -f "$stamp" ] && [ -n "$(find "$stamp" -mmin -360 2>/dev/null)" ]; then return 0; fi
+  task-notify "$1" || true
+  touch "$stamp"
+}
+creds="$HOME/.claude/.credentials.json"
+if [ ! -f "$creds" ]; then
+  _notify_auth "無頭取件預檢：找不到 CLI 憑證檔（$creds）。修復：終端機跑 claude /login"
+else
+  exp_ms=$(jq -r '[.. | .expiresAt? | select(. != null)] | first // empty' "$creds" 2>/dev/null || true)
+  if [ -n "$exp_ms" ] && [ "$(( $(date +%s) - exp_ms / 1000 ))" -gt 172800 ]; then
+    _notify_auth "無頭取件預檢：CLI 憑證已 48 小時以上沒有成功刷新，可能失效。修復：終端機跑 claude /login"
+  fi
+fi
+
 prompt=$(cat <<PROMPT
 你在無頭會話（webhook 觸發的 backlog 取件），沒有人會回你的問題。
 目標：處理 backlog 單 #$iid（task 指令已在 PATH，倉庫是內部 GitLab 的 docs/backlogs）。
@@ -62,6 +82,11 @@ rc=0
 TASK_HEADLESS=1 timeout "$TIMEOUT" \
   claude -p "$prompt" >"$run_log" 2>&1 || rc=$?
 echo "claude 退出 rc=$rc"
+
+# 事後判定（2-2B）：起了才發現憑證死了——這是最可靠的訊號
+if grep -qiE "Failed to authenticate|OAuth" "$run_log"; then
+  _notify_auth "無頭取件起不來：CLI 憑證失效（#$iid，log：$run_log）。修復：終端機跑 claude /login，之後把單重新觸發即可"
+fi
 
 # 機械兜底：模型沒機會寫回的死法（timeout=124、斷線、被殺）都落到這裡。
 labels=$(glab issue view "$iid" -R "gitlab.dev.baasgames.com/hydrogen/roles/engineer/miskawu/docs/backlogs" \
