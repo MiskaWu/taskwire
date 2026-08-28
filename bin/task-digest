@@ -21,7 +21,7 @@ now=$(date +%s)
 
 # —— 撈一次全量，本地切分（與 task 同款）——
 all=$(glab issue list -R "$REPO" --output json -P 100 2>&1) || {
-  task-notify "日報巡檢失敗：glab 連不上（$(head -c 200 <<< "$all")）。跑 task doctor 檢查。"
+  task-notify -t 異常 "日報巡檢失敗：glab 連不上（$(head -c 200 <<< "$all")）。跑 task doctor 檢查。"
   exit 1
 }
 
@@ -84,4 +84,4 @@ msg="$msg
 系統：$cred_line｜$tok_line｜$hook_line"
 
 echo "$msg"
-task-notify -d "$msg" || true
+task-notify -d -t 日報 "$msg" || true
