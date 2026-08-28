@@ -111,6 +111,20 @@ _set_state() {
   printf '#%s → %s\n' "$iid" "$want"
 }
 
+# 建標籤（不存在才建）。glab issue update 對不存在標籤的行為不保證，這裡自己保證。
+# 失敗要大聲——token 沒開標籤權限的那天，task ws 要說「沒權限」，
+# 不能默默貼不上去（查詢失敗不能長得像空清單，寫入失敗也不能長得像成功）。
+_ensure_label() { # $1=名稱 $2=顏色
+  local out
+  out=$(glab label create -R "$REPO" --name "$1" --color "$2" 2>&1) && return 0
+  case "$out" in
+    *exist*|*taken*) return 0 ;;   # 已存在＝目的已達
+  esac
+  die "建標籤 $1 失敗（token 沒開標籤權限？先跑 task doctor 看「標籤寫入」）：$out"
+}
+
+_uri() { printf '%s' "$1" | jq -sRr @uri; }
+
 cmd_help() {
   cat <<'HELP'
 task —— backlog 的指令列入口（v2）
@@ -132,8 +146,18 @@ task —— backlog 的指令列入口（v2）
   task done  <iid> "交件摘要"   doing → done（先寫留言，再貼標籤）
   task note  <iid> "<文字>"     留言，不動狀態
 
+標工作區與執行方式（誰都可以貼；標籤是機械指標，標錯了重標即可）
+  task ws <iid> <路徑> [基準分支]       單 repo（路徑指到 git repo）：dispatch 代開 worktree；
+                                        基準貼成 base::<分支>，不給＝遠端預設主線
+  task ws <iid> <路徑> [repo=分支 ...]  多 repo 工作區（如 hydrogen）：基準逐 repo 指定，
+                                        貼成 base::<repo名>::<分支>；沒指定的用各自預設主線
+  task ws <iid>                         看目前標的工作區／基準／執行方式
+  task mode <iid> <direct|read|off>     direct＝直接修主 checkout（進場前機械檢查乾淨，
+                                        髒就 block）；read＝調查單只讀；off＝回 worktree 流程
+
 檢查
   task doctor            API 真的通不通、身分、token 到期日、標籤齊不齊
+  task gc                對帳回收：清「單子已關＋乾淨＋已合進基準」的 worktree
 
 ──────────────────────────────────────────────────────────
 這兩件是你的動作，這支腳本刻意沒有對應指令：
@@ -217,6 +241,113 @@ cmd_start() {
   _set_state "$iid" doing
 }
 
+# ws —— 標工作區（2026-08-28 拍板）。這不是授權也不是驗收，不碰傷害邊界，
+# 誰都可以標；標錯的代價只是無頭線站錯地方，使用者提醒一句重標即可。
+# 值＝相對 ~/projects 的路徑，dispatch 拿到直接拼路徑，中間沒有對照表。
+# scoped label（workspace::）在 GitLab 端天然互斥，一張單只會有一個工作區。
+#
+# 基準分支的形跟工作區模式對齊（GitLab 的 scope 是「最後一個 :: 之前的全部」）：
+#   單 repo   base::<分支>            scope「base」互斥，一張單一條
+#   多 repo   base::<repo名>::<分支>  scope「base::<repo名>」互斥——一個內部 repo
+#                                     一顆、要幾顆貼幾顆，沒貼的用該 repo 遠端預設主線
+cmd_ws() {
+  local iid="$1"; shift || true
+  local rel="${1:-}"; [ $# -gt 0 ] && shift || true
+  local vj cur_repo
+  vj=$(_glab_json issue view "$iid" -R "$REPO" --output json)
+  cur_repo=$(jq -r '[.labels[]? | select(startswith("workspace::"))][0] // empty' <<< "$vj")
+  if [ -z "$rel" ]; then
+    local bases cur_mode
+    bases=$(jq -r '[.labels[]? | select(startswith("base::"))] | join("、")' <<< "$vj")
+    cur_mode=$(jq -r '[.labels[]? | select(startswith("mode::"))][0] // empty' <<< "$vj")
+    printf '#%s 工作區：%s%s%s\n' "$iid" "${cur_repo:-（未標）}" "${bases:+（$bases）}" "${cur_mode:+［$cur_mode］}"
+    return 0
+  fi
+  # 容錯：貼了絕對路徑或帶尾斜線也接受，一律正規化回相對 ~/projects。
+  rel="${rel%/}"; rel="${rel#\~/projects/}"; rel="${rel#"$HOME"/projects/}"
+  local src="$HOME/projects/$rel"
+  [ -d "$src" ] || die "~/projects/$rel 不存在——路徑要相對 ~/projects，例：hydrogen/server 或 hydrogen"
+
+  local add="workspace::$rel" un="" cur_bases b
+  cur_bases=$(jq -r '.labels[]? | select(startswith("base::"))' <<< "$vj")
+  if [ -d "$src/.git" ]; then
+    # 單 repo：最多一個基準參數，形是裸分支名。
+    local base="${1:-}"
+    [ $# -le 1 ] || die "單 repo 工作區只收一個基準分支"
+    case "$base" in *=*) die "單 repo 工作區的基準直接給分支名，不用 repo=分支" ;; esac
+    if [ -n "$base" ]; then
+      git -C "$src" rev-parse --verify -q "refs/heads/$base" >/dev/null \
+        || git -C "$src" rev-parse --verify -q "refs/remotes/origin/$base" >/dev/null \
+        || die "分支 $base 在 ~/projects/$rel 找不到（本地與 origin 都沒有）"
+      _ensure_label "base::$base" "#8A6D3B"
+      add="$add,base::$base"
+    fi
+    # 這次沒宣告到的舊基準全撤（含多 repo 形式的殘留）——重標＝重新宣告，不殘留。
+    while IFS= read -r b; do
+      { [ -n "$b" ] && [ "$b" != "base::$base" ] && un="${un:+$un,}$b"; } || true
+    done <<< "$cur_bases"
+  else
+    # 多 repo 工作區：基準參數 0..n 組，形是 <repo名>=<分支>，逐組機械預檢。
+    local pair name br sub new_bases=""
+    for pair in "$@"; do
+      case "$pair" in
+        *=*) name="${pair%%=*}"; br="${pair#*=}" ;;
+        *)   die "多 repo 工作區的基準要寫成 <repo名>=<分支>，例：server=feat-abyss（可多組）" ;;
+      esac
+      sub="$src/$name"
+      [ -d "$sub/.git" ] || die "~/projects/$rel/$name 不是 git repo"
+      git -C "$sub" rev-parse --verify -q "refs/heads/$br" >/dev/null \
+        || git -C "$sub" rev-parse --verify -q "refs/remotes/origin/$br" >/dev/null \
+        || die "分支 $br 在 ~/projects/$rel/$name 找不到（本地與 origin 都沒有）"
+      _ensure_label "base::$name::$br" "#8A6D3B"
+      add="$add,base::$name::$br"
+      new_bases="$new_bases base::$name::$br"
+    done
+    while IFS= read -r b; do
+      [ -z "$b" ] && continue
+      case " $new_bases " in *" $b "*) : ;; *) un="${un:+$un,}$b" ;; esac
+    done <<< "$cur_bases"
+  fi
+  if [ -n "$cur_repo" ] && [ "$cur_repo" != "workspace::$rel" ]; then un="${un:+$un,}$cur_repo"; fi
+  _ensure_label "workspace::$rel" "#36597F"
+  if [ -n "$un" ]; then
+    glab issue update "$iid" -R "$REPO" --label "$add" --unlabel "$un" >/dev/null
+  else
+    glab issue update "$iid" -R "$REPO" --label "$add" >/dev/null
+  fi
+  printf '#%s 工作區 → %s\n' "$iid" "$rel"
+}
+
+# mode —— 執行方式旋鈕（2026-08-28 拍板）。不貼＝worktree 流程（安全預設）；
+# direct＝直接修主 checkout（放寬安全，dispatch 進場前機械檢查主 checkout 乾淨，
+# 髒就 block——不可逆的「跟使用者未 commit 工作混掉」由這道守門擋）；
+# read＝調查單，只讀不改檔、不開 worktree，交件是單上留言。
+cmd_mode() {
+  local iid="$1" val="${2:-}"
+  local vj cur
+  vj=$(_glab_json issue view "$iid" -R "$REPO" --output json)
+  cur=$(jq -r '[.labels[]? | select(startswith("mode::"))][0] // empty' <<< "$vj")
+  if [ -z "$val" ]; then
+    printf '#%s 執行方式：%s\n' "$iid" "${cur:-（未標＝worktree 流程）}"
+    return 0
+  fi
+  case "$val" in
+    direct|read) : ;;
+    off)
+      if [ -n "$cur" ]; then glab issue update "$iid" -R "$REPO" --unlabel "$cur" >/dev/null; fi
+      printf '#%s 執行方式 → worktree 流程（預設）\n' "$iid"
+      return 0 ;;
+    *) die "mode 只認 direct／read／off（off＝回到預設 worktree 流程）" ;;
+  esac
+  _ensure_label "mode::$val" "#6B4E71"
+  if [ -n "$cur" ] && [ "$cur" != "mode::$val" ]; then
+    glab issue update "$iid" -R "$REPO" --label "mode::$val" --unlabel "$cur" >/dev/null
+  else
+    glab issue update "$iid" -R "$REPO" --label "mode::$val" >/dev/null
+  fi
+  printf '#%s 執行方式 → %s\n' "$iid" "$val"
+}
+
 cmd_doctor() {
   local ok=1
   # 刻意不用 `glab auth status`：它比對 token 的 scopes 陣列要有 api 與 write_repository，
@@ -263,6 +394,23 @@ cmd_doctor() {
     fi
   fi
 
+  # 標籤寫入探針：workspace::／base::／mode:: 由 task ws／mode 代建、
+  # base:: 屍體由 task-gc 代刪，token 要有標籤權限這些才動得了。建一顆探針
+  # 再刪掉，打真實 API 驗——探針殘留（上次刪失敗）時先補刪再判。
+  local probe="zz-taskwire-probe" pout pok=0
+  if pout=$(glab label create -R "$REPO" --name "$probe" --color "#CCCCCC" 2>&1); then
+    pok=1
+  else
+    case "$pout" in *exist*|*taken*) pok=1 ;; esac   # 殘留探針＝上次刪失敗，照樣測刪
+  fi
+  if [ "$pok" -eq 0 ]; then
+    printf '標籤寫入   建不了（token 沒開標籤權限？）：%s\n' "$(head -c 120 <<< "$pout")"; ok=0
+  elif glab api -X DELETE "projects/$(_uri "${REPO#*/}")/labels/$(_uri "$probe")" --hostname "$HOST" >/dev/null 2>&1; then
+    printf '標籤寫入   可用（探針建刪成功）\n'
+  else
+    printf '標籤寫入   建得了刪不了——token 缺刪除權限，base:: 回收會失敗（探針 %s 留著）\n' "$probe"; ok=0
+  fi
+
   local have missing=""
   have=$(glab label list -R "$REPO" 2>&1) || { printf '標籤       讀不到：%s\n' "$have"; have=""; ok=0; }
   for l in "${FLOW_LABELS[@]}"; do
@@ -306,6 +454,9 @@ main() {
     note)           _need_iid "${1:-}" note
                     [ -n "${2:-}" ] || die '要給留言內容'
                     _note "$1" "$2" ;;
+    ws)             _need_iid "${1:-}" ws; cmd_ws "$@" ;;
+    mode)           _need_iid "${1:-}" mode; cmd_mode "$1" "${2:-}" ;;
+    gc)             exec "$_TW_DIR/task-gc" ;;
     doctor)         cmd_doctor ;;
     take|submit)    die "v2 已移除 '$cmd'：take 併入 start（含驗收閘門），submit 改名 done。跑 task help。" ;;
     *)              die "沒有這個指令：$cmd（跑 task help）" ;;

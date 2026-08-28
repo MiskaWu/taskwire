@@ -1,0 +1,163 @@
+#!/usr/bin/env bash
+# task-gc —— worktree 的對帳回收（2026-08-28 拍板）。
+#
+# 形狀跟 dispatch 同一套 reconcile：worktree 的期望狀態由單子狀態推導——
+# 單子還開著，worktree 就該在；單子關了（驗收過了），worktree 就不該在。
+# 每次巡一遍 ~/.local/state/taskwire/worktrees/ 底下的目錄，命名慣例兩種：
+#   <單號>            單 repo 模式，dispatch 開的
+#   <單號>-<repo名>   工作區模式（workspace:: 指到多 repo 目錄），無頭會話照慣例開的
+#
+# 刪除是不可逆的，所以判準維持機械，三條件齊了才動手：
+#   1. 單子已關（closed）——驗收是使用者的動作，關單就是「這件事收了」。
+#   2. worktree 乾淨——沒有未 commit 的改動（含 untracked）。
+#   3. 分支尖端搆得到基準——HEAD 是基準分支（base:: 標籤指定的，沒標就是
+#      遠端預設主線）的祖先。這個判準下刪掉不丟任何 commit：
+#      純討論單（零 commit）天然通過，合併過的通過，沒合的擋下。
+# 條件不齊就**不刪、改通知**，附上手動清理的指令——掉工作的決定留給人。
+#
+# 遠端腿：只有放行過的 repo（.git/config 有 claude.worktreePushRemote）才可能有
+# 遠端 task/<N> 分支。刪遠端用同一套安全判準對遠端尖端再驗一次，
+# 只刪 task/<N> 型分支、只碰放行的那個 remote，永不碰 main。
+#
+# 失敗語意承 taskwire 家規：GitLab 查詢失敗＝大聲中止、什麼都不刪——
+# 「查不到單」絕不能被誤讀成「單子已關」。
+#
+# 呼叫端：task-dispatch 收尾順跑一次、task-digest 每日彙總；手動 `task gc`。
+
+set -uo pipefail
+export PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin"
+
+_TW_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+# shellcheck source=taskwire-config.sh
+[ -f "$_TW_DIR/taskwire-config.sh" ] && . "$_TW_DIR/taskwire-config.sh"
+
+REPO="${TASK_REPO:-gitlab.dev.baasgames.com/hydrogen/roles/engineer/miskawu/docs/backlogs}"
+STATE_DIR="$HOME/.local/state/taskwire"
+WT_ROOT="$STATE_DIR/worktrees"
+
+[ -d "$WT_ROOT" ] || echo "（GC：沒有 worktree 目錄，只做標籤回收）"
+
+removed=0 open_n=0
+warns=()
+
+# 尖端搆得到任一基準就算安全。候選：base:: 指定的分支（遠端優先）→
+# 遠端預設主線（origin/HEAD）→ 常見主線名兜底。
+_is_merged() { # $1=源 repo  $2=commit  $3=base 分支名（可空）
+  local src="$1" sha="$2" base="$3" c def
+  local cands=()
+  [ -n "$base" ] && cands+=("origin/$base" "$base")
+  def=$(git -C "$src" symbolic-ref -q --short refs/remotes/origin/HEAD || true)
+  [ -n "$def" ] && cands+=("$def")
+  cands+=(origin/main origin/master main master)
+  for c in "${cands[@]}"; do
+    git -C "$src" rev-parse --verify -q "$c" >/dev/null 2>&1 || continue
+    git -C "$src" merge-base --is-ancestor "$sha" "$c" 2>/dev/null && return 0
+  done
+  return 1
+}
+
+# 同一張單可能有多個 worktree（工作區模式），單況只查一次。
+# 刻意不用 vj=$(_fetch …) 的指令替換形式：exit 在 $( ) 的子 shell 裡只殺子 shell，
+# 「查詢失敗＝整個 GC 中止」會被靜默吞掉（沙箱實測踩到）。改設全域 vj。
+declare -A issue_cache
+_fetch_issue() { # $1=iid；結果放進全域 vj。查詢失敗＝整個 GC 中止、什麼都不刪。
+  local iid="$1"
+  if [ -n "${issue_cache[$iid]:-}" ]; then vj="${issue_cache[$iid]}"; return 0; fi
+  if ! vj=$(glab issue view "$iid" -R "$REPO" --output json 2>&1); then
+    echo "GC 中止：#$iid 查詢失敗——這不是「單子已關」，什麼都不刪。"
+    echo "$vj"
+    exit 1
+  fi
+  issue_cache[$iid]="$vj"
+}
+
+for wt in "$WT_ROOT"/*; do
+  [ -d "$wt" ] || continue
+  name=$(basename "$wt")
+  [[ "$name" =~ ^([0-9]+)(-[A-Za-z0-9._-]+)?$ ]] || { warns+=("⚠ GC：$wt 不照 <單號> 或 <單號>-<repo名> 命名，略過"); continue; }
+  iid="${BASH_REMATCH[1]}"
+
+  _fetch_issue "$iid"
+  state=$(jq -r '.state // empty' <<< "$vj")
+  [ "$state" = "closed" ] || { open_n=$((open_n+1)); continue; }
+
+  src=$(git -C "$wt" worktree list --porcelain 2>/dev/null | head -1 | sed 's/^worktree //')
+  { [ -n "$src" ] && [ -d "$src" ]; } || { warns+=("⚠ GC：#$iid（$name）讀不到源 repo，請手動看 $wt"); continue; }
+
+  if [ -n "$(git -C "$wt" status --porcelain 2>/dev/null)" ]; then
+    warns+=("⚠ GC：#$iid（$name）已關但 worktree 有未 commit 的改動，不敢刪（$wt）")
+    continue
+  fi
+
+  git -C "$src" fetch --quiet 2>/dev/null || true
+  tip=$(git -C "$wt" rev-parse HEAD 2>/dev/null) || { warns+=("⚠ GC：#$iid（$name）讀不到 HEAD，請手動看 $wt"); continue; }
+  # 基準兩形：<單號> 的 worktree 讀裸的 base::<分支>；<單號>-<repo名> 的
+  # 讀 base::<repo名>::<分支>——合併判斷要對的是「這個 repo 自己的基準」。
+  if [[ "$name" == *-* ]]; then
+    sub_name=${name#*-}
+    base_br=$(jq -r --arg pre "base::${sub_name}::" '[.labels[]? | select(startswith($pre))][0] // empty' <<< "$vj")
+    base_br=${base_br##*::}
+  else
+    base_br=$(jq -r '[.labels[]? | select(test("^base::[^:]+$"))][0] // empty' <<< "$vj")
+    base_br=${base_br#base::}
+  fi
+
+  if ! _is_merged "$src" "$tip" "$base_br"; then
+    warns+=("⚠ GC：#$iid（$name）已關但分支上有沒被合進基準的 commit，不敢刪。確認真的不要了再手動：git -C $src worktree remove $wt && git -C $src branch -D task/$iid")
+    continue
+  fi
+
+  out=$(git -C "$src" worktree remove "$wt" 2>&1) || { warns+=("⚠ GC：#$iid（$name）worktree remove 失敗：$out"); continue; }
+  git -C "$src" branch -D "task/$iid" >/dev/null 2>&1 || true
+  line="GC：#$iid（$name）已清（worktree＋本地分支）"
+
+  # 遠端腿：只在放行過的 repo 有意義；對遠端尖端用同一套判準再驗一次。
+  remote=$(git -C "$src" config --local claude.worktreePushRemote 2>/dev/null || true)
+  if [ -n "$remote" ]; then
+    rsha=$(git -C "$src" ls-remote "$remote" "refs/heads/task/$iid" 2>/dev/null | head -1 | cut -f1)
+    if [ -n "$rsha" ]; then
+      if git -C "$src" cat-file -e "$rsha^{commit}" 2>/dev/null && _is_merged "$src" "$rsha" "$base_br"; then
+        if git -C "$src" push "$remote" --delete "task/$iid" >/dev/null 2>&1; then
+          line="$line；遠端 $remote 的 task/$iid 也刪了"
+        else
+          warns+=("⚠ GC：#$iid 遠端分支刪除失敗，手動：git -C $src push $remote --delete task/$iid")
+        fi
+      else
+        warns+=("⚠ GC：#$iid 遠端 task/$iid 尖端不在本地或沒被合進基準，不敢刪遠端")
+      fi
+    fi
+  fi
+  echo "$line"
+  removed=$((removed+1))
+done
+
+# —— base:: 標籤回收（2026-08-28 拍板）。分支是短命的、專案標籤是永久的：
+# 沒有任何 open 單掛著的 base:: 標籤就是屍體，刪。workspace::（穩定詞彙表）
+# 與 mode::（固定兩顆）不掃。判準依賴「open 單清單查得到」——查詢失敗就
+# 中止回收，絕不能把「查不到」當成「沒人在用」（同 worktree 段的家規）。
+HOST="${REPO%%/*}"
+_uri() { printf '%s' "$1" | jq -sRr @uri; }
+open_json=$(glab issue list -R "$REPO" --output json -P 100 2>&1) || {
+  echo "GC 中止：open 單查詢失敗，base:: 標籤回收不做（查不到 ≠ 沒人用）。"
+  echo "$open_json"; exit 1; }
+labels_json=$(glab api "projects/$(_uri "${REPO#*/}")/labels?per_page=100" --hostname "$HOST" 2>&1) || {
+  echo "GC 中止：標籤清單查詢失敗，base:: 標籤回收不做。"
+  echo "$labels_json"; exit 1; }
+used=$(jq -r '[.[].labels[]?] | unique | .[]' <<< "$open_json")
+swept=0
+while IFS= read -r lname; do
+  [ -n "$lname" ] || continue
+  grep -qxF "$lname" <<< "$used" && continue
+  if glab api -X DELETE "projects/$(_uri "${REPO#*/}")/labels/$(_uri "$lname")" --hostname "$HOST" >/dev/null 2>&1; then
+    echo "GC：刪掉沒人用的標籤 $lname"; swept=$((swept+1))
+  else
+    warns+=("⚠ GC：刪標籤 $lname 失敗（token 沒開標籤刪除權限？跑 task doctor 看「標籤寫入」）")
+  fi
+done <<< "$(jq -r '.[].name | select(startswith("base::"))' <<< "$labels_json")"
+
+for w in ${warns[@]+"${warns[@]}"}; do echo "$w"; done
+if [ "$removed" -gt 0 ] || [ "$swept" -gt 0 ] || [ "${#warns[@]}" -gt 0 ]; then
+  echo "GC：清了 $removed 個 worktree、$swept 顆死標籤；${#warns[@]} 件要人看；$open_n 個單子還開著、保留。"
+else
+  echo "（GC：沒有要清的；$open_n 個在途 worktree）"
+fi

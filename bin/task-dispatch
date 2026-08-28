@@ -75,6 +75,103 @@ else
   fi
 fi
 
+# —— 工作區（workspace:: 標籤 → worktree）。拍板 2026-08-28：標籤是機械指標。
+# workspace::<相對 ~/projects 路徑> 指到 git repo 就機械開（或重用）worktree 站進去；
+# 指到多 repo 工作區目錄（本身不是 git repo，例：hydrogen）就站到目錄，
+# 內部要動哪個 repo 交給模型，但 worktree 位置定成慣例讓 GC 巡得到。
+# 沒標籤＝交給模型判斷（拍板：判斷放模型）；標籤指到不存在的路徑是壞指標，block。
+vj=$(glab issue view "$iid" -R "$REPO" --output json 2>&1) || {
+  echo "讀單失敗，退出：$vj"; exit 1; }
+repo_rel=$(jq -r '[.labels[]? | select(startswith("workspace::"))][0] // empty' <<< "$vj")
+repo_rel=${repo_rel#workspace::}
+# 基準有兩形：base::<分支>（單 repo）與 base::<repo名>::<分支>（多 repo 工作區，
+# 逐 repo 一顆）。這裡各取各的，互不誤抓。
+base_br=$(jq -r '[.labels[]? | select(test("^base::[^:]+$"))][0] // empty' <<< "$vj")
+base_br=${base_br#base::}
+base_map=$(jq -r '[.labels[]? | select(test("^base::[^:]+::[^:]+$")) | sub("^base::";"") | sub("::";" → ")] | join("、")' <<< "$vj")
+# mode:: 執行方式旋鈕（2026-08-28 拍板）：不貼＝worktree 流程（安全預設）；
+# read＝調查單只讀；direct＝直接修主 checkout（放寬安全，所以配機械守門：髒就 block）。
+op_mode=$(jq -r '[.labels[]? | select(startswith("mode::"))][0] // empty' <<< "$vj")
+op_mode=${op_mode#mode::}
+case "$op_mode" in
+  ""|read|direct) : ;;
+  *) task block "$iid" "不認識的 mode::$op_mode（只有 read／direct，拿掉標籤＝預設 worktree 流程）。請重標：task mode $iid <direct|read|off>。"
+     exit 0 ;;
+esac
+
+WT_ROOT="$STATE_DIR/worktrees"
+ws_hint=""
+if [ -n "$repo_rel" ]; then
+  src="$HOME/projects/$repo_rel"
+  if [ -d "$src/.git" ] && [ "$op_mode" = "read" ]; then
+    # 調查單：不開 worktree，站主 checkout 只讀。
+    cd "$src"
+    ws_hint="這是調查單（mode::read）：你站在 ~/projects/$repo_rel 的主 checkout，只讀不改檔——不開 worktree、不 commit。交件是把調查結論寫回單上（task note／task done 的留言）。"
+  elif [ -d "$src/.git" ] && [ "$op_mode" = "direct" ]; then
+    # 直接修主 checkout。機械守門：主 checkout 不乾淨就 block——
+    # 使用者未 commit 的工作和代理的改動混在一起是不可逆傷害，這條不放。
+    if [ -n "$(git -C "$src" status --porcelain 2>/dev/null)" ]; then
+      task block "$iid" "mode::direct 但 ~/projects/$repo_rel 的主 checkout 有未 commit 的改動——不敢進場，怕跟你手上的工作混在一起。清乾淨再觸發，或改走 worktree（task mode $iid off）。"
+      exit 0
+    fi
+    cd "$src"
+    ws_hint="直接修模式（mode::direct）：你站在 ~/projects/$repo_rel 的主 checkout（進場前已確認乾淨），直接在目前分支上修，完成要 commit；不開 worktree、不推 origin。"
+  elif [ -d "$src/.git" ]; then
+    mkdir -p "$WT_ROOT"
+    wt="$WT_ROOT/$iid"
+    if [ ! -d "$wt" ]; then
+      git -C "$src" fetch --quiet 2>/dev/null || echo "fetch 失敗，改用本地基準"
+      if git -C "$src" rev-parse --verify -q "refs/heads/task/$iid" >/dev/null; then
+        # 分支還在（上次 worktree 被清但分支保留）：接回同一條分支
+        wt_out=$(git -C "$src" worktree add "$wt" "task/$iid" 2>&1) \
+          || { task block "$iid" "重開 worktree 失敗：$wt_out"; exit 0; }
+      else
+        base_ref=""
+        if [ -n "$base_br" ]; then
+          for cand in "origin/$base_br" "$base_br"; do
+            git -C "$src" rev-parse --verify -q "$cand" >/dev/null && { base_ref="$cand"; break; } || true
+          done
+          [ -n "$base_ref" ] || { task block "$iid" "base::$base_br 在 ~/projects/$repo_rel 找不到（本地與 origin 都沒有）。請重標：task ws $iid $repo_rel <分支>。"; exit 0; }
+        else
+          base_ref=$(git -C "$src" symbolic-ref -q --short refs/remotes/origin/HEAD || true)
+          [ -n "$base_ref" ] || base_ref=$(git -C "$src" symbolic-ref -q --short HEAD)
+        fi
+        wt_out=$(git -C "$src" worktree add "$wt" -b "task/$iid" "$base_ref" 2>&1) \
+          || { task block "$iid" "開 worktree 失敗：$wt_out"; exit 0; }
+        echo "worktree 開好：$wt（基準 $base_ref）"
+      fi
+    else
+      echo "worktree 重用：$wt"
+    fi
+    cd "$wt"
+    ws_hint="工作區已備好——你現在就站在這張單的 worktree（分支 task/$iid，源 repo ~/projects/$repo_rel${base_br:+，基準 $base_br}）。改動就在這裡做，完成要 commit；不推 origin（push guard 會擋，這是設計不是障礙）。"
+  elif [ -d "$src" ]; then
+    # 多 repo 工作區模式：站到目錄即可，內部判斷交給模型，但 worktree 位置是慣例。
+    cd "$src"
+    case "$op_mode" in
+      read)
+        ws_hint="這是調查單（mode::read）：你站在多 repo 工作區 ~/projects/$repo_rel，只讀不改檔——不開 worktree、不 commit。交件是把調查結論寫回單上（task note／task done 的留言）。" ;;
+      direct)
+        # 多 repo 下守門守不了（不知道會動哪個 repo），乾淨檢查交給模型執行。
+        ws_hint="直接修模式（mode::direct）：你站在多 repo 工作區 ~/projects/$repo_rel，要動哪些內部 repo 由你判斷，直接修該 repo 的主 checkout——但動手前先確認該 repo 乾淨（git status），髒就 task block 不要碰；完成在目前分支 commit、不推 origin。" ;;
+      *)
+        ws_hint="工作區是 ~/projects/$repo_rel——這是多 repo 的工作區目錄（本身不是 git repo），你已站在這裡。要動哪些內部 repo 由你依單上內容判斷。程式改動不要直接改各 repo 的主 checkout：在該 repo 開 worktree，位置固定 $WT_ROOT/$iid-<repo名>、分支 task/$iid，完成要 commit、不推 origin。位置慣例是 GC 對帳用的，別放別處。基準分支：${base_map:+單上指定了 $base_map；}沒指定的 repo 先 fetch、從它的遠端預設主線長出來。" ;;
+    esac
+  else
+    task block "$iid" "工作區標籤 workspace::$repo_rel 指到的 ~/projects/$repo_rel 不存在。請重標：task ws $iid <路徑>。"
+    exit 0
+  fi
+else
+  case "$op_mode" in
+    read)
+      ws_hint="這張單沒有標工作區（workspace:: 標籤），但標了 mode::read：調查單，只讀不改檔，該看哪裡由你判斷；交件是把結論寫回單上。判斷不出來就 task block 請使用者跑 task ws $iid <路徑>。" ;;
+    direct)
+      ws_hint="這張單沒有標工作區（workspace:: 標籤），但標了 mode::direct：落在哪個 repo 由你判斷，直接修主 checkout——動手前先確認該 repo 乾淨（git status），髒就 task block 不要碰；完成 commit、不推 origin。判斷不出來就 task block 請使用者跑 task ws $iid <路徑>。" ;;
+    *)
+      ws_hint="這張單沒有標工作區（workspace:: 標籤）。由你判斷工作落在哪個 repo：cd 過去做，程式改動開 worktree、完成要 commit、不推 origin。判斷不出來就 task block 請使用者跑 task ws $iid <路徑> 標好工作區再觸發。" ;;
+  esac
+fi
+
 prompt=$(cat <<PROMPT
 你在無頭會話（webhook 觸發的 backlog 取件），沒有人會回你的問題。
 目標：處理 backlog 單 #$iid（task 指令已在 PATH，倉庫是內部 GitLab 的 docs/backlogs）。
@@ -84,9 +181,7 @@ prompt=$(cat <<PROMPT
 2. task start $iid "開工摘要" 接手。驗收條件由你判斷：單上有就照它；
    沒有就依需求自己擬一份可檢查的，先 task note 留在單上再動工；
    需求模糊到你擬不出可檢查的條件，就 task block 問。
-3. 動手做。工作落地的 repo 與位置以單上寫的為準——單上看不出落哪裡就
-   task block 問，不要自己猜一個地方放。程式改動一律在目標 repo 的
-   worktree 進行，完成要 commit；不推 origin（push guard 會擋，這是設計不是障礙）。
+3. 動手做。$ws_hint
 4. 任何沒把握的點——驗收看不懂、要做設計取捨、權限被拒又繞不開——
    不要猜：task block $iid "卡在哪＋你的建議"，然後結束。
 5. 做完且依驗收條件自檢通過：task done $iid "交件摘要＋你怎麼驗的"。
@@ -117,4 +212,6 @@ case " $labels " in
     echo "#$iid 最終狀態：${labels:-（無標籤）}，不需兜底。"
     ;;
 esac
+# 對帳回收：關單後的 worktree 由 GC 依安全判準清掉（詳見 task-gc 檔頭）。
+"$_TW_DIR/task-gc" || echo "GC 沒跑完（見上方輸出），不影響本次取件。"
 echo "=== dispatch 結束 $(date '+%F %T')（exit=$rc）==="

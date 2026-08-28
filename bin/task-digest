@@ -89,5 +89,11 @@ $stale_doing"
 msg="$msg
 系統：$cred_line｜$tok_line｜$hook_line"
 
+# —— worktree 對帳回收：清掉已關單的 worktree，不敢刪的列出來要人看 ——
+gc_out=$("$_TW_DIR/task-gc" 2>&1) || true
+gc_lines=$(grep -E '^(GC：|⚠ GC|GC 中止)' <<< "$gc_out" || true)
+[ -n "$gc_lines" ] && msg="$msg
+$gc_lines"
+
 echo "$msg"
 task-notify -d -t 日報 "$msg" || true

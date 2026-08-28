@@ -28,7 +28,24 @@
    （dispatch 退出後單子還在 doing 就補 block）。兜底不能刪——它保證單子永遠不會
    停在「看起來有人在做、其實沒人在做」。
 6. 代理寫的留言一律經 `_note`（`🤖 [claude]` 前綴）——同一個 GitLab 帳號下的作者標記。
-7. 通知一律走 `task-notify`：例行的用 `-d -t <類型>`（球權／日報／異常，同類回同串、
+7. **工作區是標籤，回收是對帳**（2026-08-28）：單上貼 `workspace::<相對 ~/projects 路徑>`
+   （`task ws` 代勞），dispatch 據此在
+   `~/.local/state/taskwire/worktrees/<單號>` 開 worktree（分支 `task/<單號>`）站進去起會話；
+   路徑指到多 repo 工作區目錄（如 `hydrogen`）就只站目錄、內部交模型判斷，
+   但 worktree 要照 `<單號>-<repo名>` 慣例放同一目錄。基準分支兩形，跟模式對齊：
+   單 repo 貼 `base::<分支>`；多 repo 逐 repo 貼 `base::<repo名>::<分支>`（scope 是
+   「最後一個 :: 之前」，所以逐 repo 互斥、彼此並存），沒貼的用各自遠端預設主線。
+   執行方式另有 `mode::` 旋鈕（`task mode` 代勞）：不貼＝worktree 流程（安全預設）；
+   `mode::direct`＝直接修主 checkout，dispatch 進場前機械檢查主 checkout 乾淨、髒就
+   block（不可逆的守門，不放）；`mode::read`＝調查單，不開 worktree、只讀，交件是留言。
+   標籤詞彙的權責：流程四標由使用者建；`workspace::`／`base::`／`mode::` 由
+   `task ws`／`task mode` 代建（`_ensure_label`，失敗大聲死不默默吞），
+   沒有 open 單掛著的 `base::` 屍體由 `task-gc` 回收——分支短命、專案標籤永久，
+   不掃會堆滿下拉選單。因此 **token 要開標籤建刪權限**，`task doctor` 的
+   「標籤寫入」探針會建刪一顆 `zz-taskwire-probe` 直接驗。`task-gc` 只在
+   「單子已關＋worktree 乾淨＋尖端已併入基準」三條件齊時才刪（含放行 remote 的
+   `task/<N>` 遠端分支），不齊就通知不刪——掉工作的決定留給人。
+8. 通知一律走 `task-notify`：例行的用 `-d -t <類型>`（球權／日報／異常，同類回同串、
    新類自動開串）；GitLab 健康卡（blocked）只留給真異常，別讓例行訊息洗掉它。
 8. **控制台是設定與觀測，單況唯讀**（2026-08-28）。`task-ui` 不加「拉 todo」與
    「關單」按鈕。理由不是技術上擋得住——無頭 claude 手上有 Bash，它要關單根本
@@ -46,7 +63,7 @@
 | 元件 | 部署 | 改動後 |
 |---|---|---|
 | `bin/task` `task-notify` | symlink 進 `~/.local/bin/`，改即生效 | `bash -n` 檢查 |
-| `bin/task-dispatch` `task-digest` | 由 systemd／webhookd 以絕對路徑呼叫，改即生效 | `bash -n` |
+| `bin/task-dispatch` `task-digest` `task-gc` | 由 systemd／webhookd 以絕對路徑呼叫，改即生效（gc 另有手動入口 `task gc`） | `bash -n` |
 | `bin/task-webhookd` | **quadlet 容器**（taskwire-webhook 映像，:9587；程式 COPY 進映像） | `py_compile` → `podman build -t taskwire-webhook:latest -f Containerfile.webhook .` → `systemctl --user restart task-webhook` |
 | `systemd/task-doorbell.path` `task-dispatch.service` | 門鈴信箱監看＋dispatch 的 unit 形（`task-scan.timer` 也指向後者） | `cp` → `daemon-reload` |
 | `bin/task-ui` `ui/index.html` | `task-ui.service` 常駐（127.0.0.1:9588） | `python3 -m py_compile` 後 `systemctl --user restart task-ui`；改頁面不用重啟 |

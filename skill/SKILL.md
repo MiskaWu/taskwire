@@ -14,6 +14,13 @@ description: GitLab work items 工作清單（backlogs）的入口與慣例。�
 - **談定就落單。** 對話收斂出需求、拍板、驗收條件時，主動問使用者「要開單／落到 #N 嗎」。
   對話會消失，單不會——結晶必須進單。開單 `task new "<標題>" "<why／現況／落地位置／驗收方向>"`，
   補脈絡 `task note <iid> "…"`。
+- **落單時順手標工作區。** `task ws <iid> <相對 ~/projects 的路徑> [基準分支]`——
+  無頭線照它開 worktree（指到 git repo）或站進多 repo 工作區目錄（如 `hydrogen`）；
+  多 repo 的基準逐 repo 指定：`task ws <iid> hydrogen server=feat-abyss gm=dev`，
+  沒指定的用各自遠端預設主線。不標籤＝無頭側自己判斷，判斷不了會 block 回來要你標。
+  執行方式 `task mode <iid> <direct|read|off>`：direct＝直接修主 checkout（dispatch 會
+  先機械檢查主 checkout 乾淨，髒就 block）、read＝調查單只讀不開 worktree、
+  off＝回預設 worktree 流程。direct 放寬安全，由使用者拍板才貼。
 - **動手前對一眼 `task mine`。** 無頭線可能正在做同一件事（doing 標籤），撞到先跟使用者確認。
 - 接手：`task start <iid> "開工摘要"`（todo／blocked 可接）。卡住：`task block <iid> "卡在哪＋建議"`。
   做完：`task done <iid> "交件摘要＋怎麼驗的"`。
