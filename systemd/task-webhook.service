@@ -1,0 +1,13 @@
+# task-webhook —— GitLab webhook 門鈴（常駐，例外經使用者拍板 2026-08-27）。
+# 安裝：cp 到 ~/.config/systemd/user/ 後
+#   systemctl --user daemon-reload && systemctl --user enable --now task-webhook
+[Unit]
+Description=backlog webhook 門鈴（GitLab issue 事件 → task-dispatch）
+
+[Service]
+ExecStart=%h/projects/taskwire/bin/task-webhookd
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
