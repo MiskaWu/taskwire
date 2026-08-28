@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# task-dispatch —— 無頭取件器。webhook（門鈴）與可選的對帳 timer 都打這裡。
+# task-dispatch —— 無頭取件器。門鈴信箱（task-doorbell.path）與對帳 timer 都以
+# task-dispatch.service 拉起這裡；task-ui 的手動叫醒直接執行本檔。
 #
 # 一次處理一張單：task next 取件 → 起無頭 claude 照協定做 → 機械兜底。
 # 兩層寫回（設計文件「C 檔施工規格」）：
@@ -32,6 +33,13 @@ TIMEOUT="${TASK_DISPATCH_TIMEOUT:-3600}"   # 秒。防「做錯方向做一整�
 # 兜底那段要用同一個倉庫路徑；以前這裡是寫死的字面值，改設定就會兩邊分岔。
 REPO="${TASK_REPO:-gitlab.dev.baasgames.com/hydrogen/roles/engineer/miskawu/docs/backlogs}"
 mkdir -p "$STATE_DIR"
+
+# 收信箱：把門鈴紙條清掉。必須在搶鎖「之前」——搶輸的那次也要把紙條收走,
+# 否則 task-doorbell.path 看到信箱非空，會在本次退出後立刻再觸發，空轉。
+# 紙條不含資訊（門鈴只有一個位元），收走不會漏事——真實狀態由 task next 重讀。
+DOORBELL_DIR="$STATE_DIR/doorbell"
+mkdir -p "$DOORBELL_DIR"
+rm -f "$DOORBELL_DIR"/ring-* 2>/dev/null || true
 
 exec 9>"$LOCK"
 flock -n 9 || { echo "dispatch 已在跑，跳過（$(date '+%F %T')）"; exit 0; }

@@ -1,7 +1,0 @@
-# task-scan —— 可選的對帳輪詢：漏接 webhook 時的保底。預設不啟用。
-[Unit]
-Description=backlog 對帳輪詢（可選保底，跑一次 task-dispatch）
-
-[Service]
-Type=oneshot
-ExecStart=%h/projects/taskwire/bin/task-dispatch

@@ -1,8 +1,11 @@
-# task-webhook —— GitLab webhook 門鈴（常駐，例外經使用者拍板 2026-08-27）。
-# 安裝：cp 到 ~/.config/systemd/user/ 後
-#   systemctl --user daemon-reload && systemctl --user enable --now task-webhook
+# task-webhook —— GitLab webhook 門鈴（直跑版；與 task-webhook.container 二選一,
+# 兩者最終都是 task-webhook.service 這個 unit 名，裝哪個就放哪個的檔）。
+# 2026-08-28 改造：驗簽後只往門鈴信箱投紙條，起 dispatch 歸 task-doorbell.path。
+# 沒設定 webhook 密鑰就不啟動（使用者拍板）：Condition 讓它安靜跳過、不算故障,
+# 而不是啟動失敗後被 Restart=always 每五秒拉起來空轉。
 [Unit]
-Description=backlog webhook 門鈴（GitLab issue 事件 → task-dispatch）
+Description=backlog webhook 門鈴（GitLab 事件 → 門鈴信箱）
+ConditionPathExists=%h/.config/taskwire/webhook-secret
 
 [Service]
 ExecStart=%h/projects/taskwire/bin/task-webhookd

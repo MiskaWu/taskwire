@@ -1,0 +1,11 @@
+# task-dispatch —— 無頭取件（oneshot）。task-doorbell.path 與 task-scan.timer
+# 都拉這一個 unit：systemd 對同名 unit 天然串行，兩個觸發源不會撞。
+# 輸出續寫 dispatch.log，跟 task-ui 手動叫醒走的是同一本帳。
+[Unit]
+Description=backlog 無頭取件（oneshot）
+
+[Service]
+Type=oneshot
+ExecStart=%h/projects/taskwire/bin/task-dispatch
+StandardOutput=append:%h/.local/state/taskwire/dispatch.log
+StandardError=append:%h/.local/state/taskwire/dispatch.log
