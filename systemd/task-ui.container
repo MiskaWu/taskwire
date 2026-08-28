@@ -1,0 +1,52 @@
+# task-ui 的 podman 版（quadlet）。與 task-ui.service 二選一——兩者搶同一個埠。
+#
+# 安裝：
+#   podman build -t taskwire-ui:latest -f Containerfile .
+#   mkdir -p ~/.config/containers/systemd
+#   cp systemd/task-ui.container ~/.config/containers/systemd/
+#   systemctl --user disable --now task-ui.service   # 先退掉直跑版
+#   systemctl --user daemon-reload && systemctl --user start task-ui.service
+#
+# 掛載清單分兩段，這個分界就是容器化這個服務的全部代價所在：
+# 上半段是控制台本來就該讀寫的東西，掛了不影響隔離；下半段是為了讓那些
+# 「按得動」的按鈕真的按得動而必須交出去的宿主機能力。想少給就註解掉，
+# 對應功能會自動降級成在頁面上印指令給你複製，不會壞掉（見 host_action）。
+[Unit]
+Description=taskwire 控制台（podman）
+
+[Container]
+Image=localhost/taskwire-ui:latest
+AutoUpdate=local
+# 容器內外同 uid 同路徑。keep-id 不能省：D-Bus 認的是 uid，
+# 路徑錯開的話 systemctl --user 連不上。
+UserNS=keep-id
+PublishPort=127.0.0.1:9588:9588
+Environment=TASK_UI_BIND=0.0.0.0
+Environment=XDG_RUNTIME_DIR=/run/user/%U
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/%U/bus
+
+# —— 便宜的那半：控制台的本業 ——
+Volume=%h/.config/taskwire:%h/.config/taskwire:rw
+Volume=%h/.local/state/taskwire:%h/.local/state/taskwire:rw
+Volume=%h/projects/taskwire:%h/projects/taskwire:rw
+Volume=/etc/localtime:/etc/localtime:ro
+
+# —— 貴的那半：每一行都是交出去的一塊宿主機能力 ——
+# 查單況（含 GitLab token）
+Volume=%h/.config/glab-cli:%h/.config/glab-cli:ro
+# 寫排程 drop-in
+Volume=%h/.config/systemd/user:%h/.config/systemd/user:rw
+# 開關服務。給了這個，容器就能重啟或改寫你任何一個 user unit——不只 taskwire 的。
+Volume=/run/user/%U:/run/user/%U:rw
+# 讀 journal（machine-id 是 journalctl 定位檔案用的，缺了會說 No journal files found）
+Volume=/var/log/journal:/var/log/journal:ro
+Volume=/etc/machine-id:/etc/machine-id:ro
+# 顯示無頭憑證健不健康。只讀一個到期時間，卻要交出 Claude 的憑證檔。
+Volume=%h/.claude/.credentials.json:%h/.claude/.credentials.json:ro
+
+[Service]
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

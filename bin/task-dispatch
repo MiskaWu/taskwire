@@ -20,9 +20,17 @@
 set -euo pipefail
 export PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin"
 
+# 設定的單一真相來源：~/.config/taskwire/config.env（見 taskwire-config.sh）。
+# readlink -f 不能省——這支腳本是 symlink 進 ~/.local/bin/ 的。
+_TW_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+# shellcheck source=taskwire-config.sh
+[ -f "$_TW_DIR/taskwire-config.sh" ] && . "$_TW_DIR/taskwire-config.sh"
+
 STATE_DIR="$HOME/.local/state/taskwire"
 LOCK="$STATE_DIR/dispatch.lock"
 TIMEOUT="${TASK_DISPATCH_TIMEOUT:-3600}"   # 秒。防「做錯方向做一整夜」。
+# 兜底那段要用同一個倉庫路徑；以前這裡是寫死的字面值，改設定就會兩邊分岔。
+REPO="${TASK_REPO:-gitlab.dev.baasgames.com/hydrogen/roles/engineer/miskawu/docs/backlogs}"
 mkdir -p "$STATE_DIR"
 
 exec 9>"$LOCK"
@@ -89,7 +97,7 @@ if grep -qiE "Failed to authenticate|OAuth" "$run_log"; then
 fi
 
 # 機械兜底：模型沒機會寫回的死法（timeout=124、斷線、被殺）都落到這裡。
-labels=$(glab issue view "$iid" -R "gitlab.dev.baasgames.com/hydrogen/roles/engineer/miskawu/docs/backlogs" \
+labels=$(glab issue view "$iid" -R "$REPO" \
            --output json 2>/dev/null | jq -r '[.labels[]?] | join(" ")' || echo "")
 case " $labels " in
   *" doing "*)
