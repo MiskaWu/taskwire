@@ -1,0 +1,30 @@
+# task-webhook 的 podman 版（quadlet）。與 systemd/task-webhook.service 二選一。
+# 安裝：
+#   podman build -t taskwire-webhook:latest -f Containerfile.webhook .
+#   rm -f ~/.config/systemd/user/task-webhook.service      # 退掉直跑版
+#   cp systemd/task-webhook.container ~/.config/containers/systemd/
+#   systemctl --user daemon-reload && systemctl --user start task-webhook
+# quadlet 生成的 unit 不吃 enable/disable（開機自啟由下面的 [Install] 決定）,
+# 控制台上會標成「quadlet 管理」。
+[Unit]
+Description=backlog webhook 門鈴（podman；驗簽 → 門鈴信箱）
+ConditionPathExists=%h/.config/taskwire/webhook-secret
+
+[Container]
+Image=localhost/taskwire-webhook:latest
+UserNS=keep-id
+PublishPort=9587:9587
+Environment=TASK_WEBHOOK_PORT=9587
+
+# 掛載清單的全部——這兩行就是門鈴改造的意義所在。
+# 密鑰是單檔 bind mount：UI 重產密鑰是原子換檔（新 inode），容器看到的仍是舊檔,
+# 所以換完密鑰要重啟門鈴——UI 存檔後本來就會提示這件事。
+Volume=%h/.config/taskwire/webhook-secret:%h/.config/taskwire/webhook-secret:ro
+Volume=%h/.local/state/taskwire/doorbell:%h/.local/state/taskwire/doorbell:rw
+
+[Service]
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

@@ -2,10 +2,17 @@
 """task-webhookd —— 接 GitLab webhook 的門鈴。
 
 設計原則：**webhook 是門鈴，不是資料來源。**
-這支服務收到 issue 事件後只做一件事：叫醒 task-dispatch，然後立刻回 200。
+這支服務收到 issue 事件後只做一件事：往門鈴信箱投一張紙條，然後立刻回 200。
+起 task-dispatch 的職責歸宿主機的 task-doorbell.path（systemd 盯著信箱目錄）。
 它不解讀 payload 裡的細節——單子的真實狀態永遠由 dispatch 打 API 重新確認。
 好處：漏接事件不會壞資料（只是慢一拍，可選的對帳 timer 會補），
 重複事件天然冪等（dispatch 有 flock，忙碌中就跳過）。
+
+2026-08-28 改造：以前這支程式「同時」是全機唯一迎接網路流量的行程、又握有
+起 dispatch 的執行權——那個同時就是風險所在。拆開之後它的全部能力只剩按鈴
+（資訊量一個位元），因此可以乾淨容器化（Containerfile.webhook：只掛密鑰唯讀
+＋信箱可寫，沒有 glab、沒有 systemd、沒有任何憑證）。直跑在宿主機也一樣成立,
+部署二選一，行為相同。
 
 安全：優先驗 Webhook-Signature 標頭（GitLab 的 signing token——用密鑰對
 payload 做 HMAC-SHA256，密鑰本身不隨請求傳輸，在 http 環境下比明文 token
@@ -26,14 +33,13 @@ import hashlib
 import hmac
 import json
 import os
-import subprocess
 import sys
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PORT = int(os.environ.get("TASK_WEBHOOK_PORT", "9587"))
 SECRET_FILE = os.path.expanduser("~/.config/taskwire/webhook-secret")
-DISPATCH = os.path.expanduser("~/projects/taskwire/bin/task-dispatch")
-LOG_DIR = os.path.expanduser("~/.local/state/taskwire")
+DOORBELL = os.path.expanduser("~/.local/state/taskwire/doorbell")
 
 
 def log(msg: str) -> None:
@@ -143,17 +149,20 @@ class Handler(BaseHTTPRequestHandler):
             # 但 dispatch 的 flock 與冪等取件天然消化。其餘事件（push…）收下不動作。
             self._reply(200, "ignored\n")
             return
-        # 叫醒 dispatch：detach、不等它、輸出交給它自己的 log。
-        # dispatch 忙碌中會被自己的 flock 擋掉，這裡永遠不用管重複。
-        os.makedirs(LOG_DIR, exist_ok=True)
-        with open(os.path.join(LOG_DIR, "dispatch.log"), "ab") as out:
-            subprocess.Popen(
-                [DISPATCH],
-                stdout=out,
-                stderr=out,
-                start_new_session=True,
-            )
-        log("issue 事件 → 已叫醒 dispatch")
+        # 投遞門鈴：往信箱放一張紙條就結束，不起任何子行程。宿主機的
+        # task-doorbell.path 看到信箱非空會起 task-dispatch，dispatch 開場自己收信。
+        # 信箱裡已有未收的紙條就不再投——門鈴的資訊量只有一個位元，多投不加分,
+        # 也讓信箱天然不會被連環事件塞滿。
+        os.makedirs(DOORBELL, exist_ok=True)
+        try:
+            pending = os.listdir(DOORBELL)
+        except OSError:
+            pending = []
+        if not pending:
+            ring = os.path.join(DOORBELL, "ring-%d-%d" % (time.time_ns(), os.getpid()))
+            with open(ring, "w", encoding="utf-8") as fh:
+                fh.write(kind + "\n")
+        log(kind + " 事件 → 已投遞門鈴")
         self._reply(200, "ok\n")
 
 
@@ -161,11 +170,8 @@ def main() -> int:
     if not os.path.isfile(SECRET_FILE):
         log(f"錯誤：找不到密鑰檔 {SECRET_FILE}，先跑安裝步驟。")
         return 1
-    if not os.access(DISPATCH, os.X_OK):
-        log(f"錯誤：dispatch 不可執行：{DISPATCH}")
-        return 1
     server = ThreadingHTTPServer(("", PORT), Handler)
-    log(f"task-webhookd 監聽 :{PORT}（/hook 收 issue 事件，/healthz 健康檢查）")
+    log(f"task-webhookd 監聽 :{PORT}（/hook 驗簽投門鈴，/healthz 健康檢查）")
     server.serve_forever()
     return 0
 

@@ -1,0 +1,13 @@
+# 門鈴的容器版。改造後 webhookd 通過「空機器測試」：它需要的宿主機接觸面只剩
+#   讀一個密鑰檔（唯讀）＋寫一個信箱目錄,
+# 沒有 glab、沒有 systemd、沒有任何憑證——這是 taskwire 裡容器買到真隔離的地方,
+# 跟 task-ui 那顆「把宿主機能力一項項掛回去」的映像是兩回事。
+#
+# 程式 COPY 進映像而不是掛載：門鈴的職責已經凍結（收 HTTP、驗簽、投紙條）,
+# 映像不可變讓被打穿的容器連自己的程式都改不掉。改 bin/task-webhookd 之後要
+# 重 build 再 restart。
+FROM docker.io/library/python:3-alpine
+COPY bin/task-webhookd /usr/local/bin/task-webhookd
+ENV HOME=/home/miskawu
+EXPOSE 9587
+CMD ["python3", "/usr/local/bin/task-webhookd"]

@@ -1,0 +1,14 @@
+# task-doorbell —— 門鈴信箱的監看者（2026-08-28 門鈴改造）。
+# webhookd（容器或直跑）驗完簽章只會往 ~/.local/state/taskwire/doorbell/ 投紙條;
+# systemd 看到信箱非空就起 task-dispatch.service。dispatch 收工時 systemd 會再看
+# 一眼信箱，還有紙條就再起一次——「做完一張接力下一張」天然成立，不用寫程式。
+[Unit]
+Description=taskwire 門鈴信箱監看（紙條到就起 task-dispatch）
+
+[Path]
+DirectoryNotEmpty=%h/.local/state/taskwire/doorbell
+Unit=task-dispatch.service
+MakeDirectory=yes
+
+[Install]
+WantedBy=default.target
