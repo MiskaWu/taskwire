@@ -58,6 +58,23 @@
    就不是腳本真正在用的值，那比沒有控制台更糟。加新旋鈕只改 `taskwire_config.py`
    的 `SETTINGS`，網頁表單會自己長出來，不要在頁面上手寫欄位。
 
+## 早報（雲端 routine）與 taskwire 的邊界（2026-08-28 收尾）
+
+早報是獨立的上層服務（claude.ai routine「Morning brief」，trig_01AqYFffSzcMDYt99U7cEFA4，
+平日 08:00 台北）：**讀 taskwire、不借 taskwire 的任何管道**——不用 task-notify、
+不進 discord-threads.json，依賴方向單向，上層不寫下層。唯讀鐵則寫死在 routine prompt
+（不執行 task pull/done/close/block/new/note）。
+
+- **心跳走 Slack**「早報」頻道（C0BTATMB91U）——連接器流量走 Anthropic 通道，不經沙盒
+  網路。**discord.com 被雲端 egress 在 Custom 白名單之上封鎖**（實測：frame 網域通、
+  discord CONNECT 403），別再試著讓雲端發 Discord；Discord 論壇串「早報」已停用留檔。
+- remote-devices（本機橋）在排程 session 目前不存在 → 早報暫看不到 taskwire；
+  prompt 每次試找（上限兩次呼叫），橋回來會自動接上。
+- **task-digest 續開**（與早報無重疊）。哪天早報吃得到 taskwire，用控制台的
+  「取消自啟」關 digest；心跳職責（天天發、沒發即故障）由早報承接。
+- 無人值守的教訓：routine 用到的工具（Artifact、PushNotification、Slack 發送）都要進
+  allowed_tools，否則執行會停在權限提示等人。細節見記憶 morning-brief-routine。
+
 ## 元件與部署位置
 
 | 元件 | 部署 | 改動後 |
