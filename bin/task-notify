@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# task-notify —— taskwire 的系統級通知管道（2026-08-28 拍板：Discord 推播＋GitLab 留痕）。
+#
+# 用法：task-notify "<訊息>"
+#
+# 這條管道不只服務憑證失效——之後所有系統級異常（token 快到期、API 不通、
+# timer 漏跑）都走這裡。兩條腿：
+#   Discord：~/.config/taskwire/discord-webhook 放 webhook URL（0600）。
+#            檔案不存在就明講跳過——不靜默，但也不因此失敗。
+#   GitLab：固定卡「🤖 taskwire 系統健康」留言並掛 blocked（球在使用者）。
+#            卡不存在就建（task new 有同名去重）。恢復後由使用者撤標籤或關單。
+#
+# 兩條腿各自失敗都不阻斷另一條；全滅時訊息至少留在呼叫端的 log 裡。
+
+set -uo pipefail
+export PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin"
+
+msg="${1:?用法：task-notify \"<訊息>\"}"
+
+hook_file="$HOME/.config/taskwire/discord-webhook"
+if [ -f "$hook_file" ]; then
+  if curl -s -m 10 -X POST -H "Content-Type: application/json" \
+       -d "$(jq -n --arg c "🔔 taskwire：$msg" '{content:$c}')" \
+       "$(< "$hook_file")" >/dev/null; then
+    echo "Discord 已通知"
+  else
+    echo "Discord 通知失敗（不阻斷）"
+  fi
+else
+  echo "（未設 Discord webhook：$hook_file 不存在，跳過推播）"
+fi
+
+TITLE="🤖 taskwire 系統健康"
+task new "$TITLE" "taskwire 的系統級異常通知落點（憑證失效、API 不通、timer 異常）。異常訊息以留言累積；恢復後由使用者撤 blocked 或關單。" >/dev/null 2>&1
+iid=$(task all 2>/dev/null | grep -F "$TITLE" | grep -oE '#[0-9]+' | head -1 | tr -d '#' || true)
+if [ -n "${iid:-}" ]; then
+  task block "$iid" "$msg" >/dev/null 2>&1 \
+    && echo "GitLab 已留痕（#$iid → blocked）" \
+    || echo "GitLab 留痕失敗（API 可能也掛了）"
+else
+  echo "GitLab 留痕失敗：找不到也建不了健康卡"
+fi
