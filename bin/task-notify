@@ -1,51 +1,77 @@
 #!/usr/bin/env bash
-# task-notify —— taskwire 的系統級通知管道（2026-08-28 拍板：Discord 推播＋GitLab 留痕）。
+# task-notify —— taskwire 的系統級通知管道（Discord 論壇模式＋GitLab 留痕）。
 #
-# 用法：task-notify "<訊息>"
+# 用法：task-notify [-d] [-t <類型>] "<訊息>"
+#   -d        只推 Discord，不動 GitLab 健康卡（日報、球權這類例行通知用——
+#             健康卡留給真異常，不然 blocked 標籤會被日常訊息洗掉）。
+#   -t <類型> 討論串的分類 key，預設「異常」。同類型永遠回同一條串，
+#             新類型自動開新串——webhook 掛在論壇頻道，開串是 webhook 自己做的，
+#             不需要任何手動建串（模式承自 discord-forum-post，2026-08-28 實測拍板）。
 #
-# 這條管道不只服務憑證失效——之後所有系統級異常（token 快到期、API 不通、
-# timer 漏跑）都走這裡。兩條腿：
-#   Discord：~/.config/taskwire/discord-webhook 放 webhook URL（0600）。
-#            檔案不存在就明講跳過——不靜默，但也不因此失敗。
-#   GitLab：固定卡「🤖 taskwire 系統健康」留言並掛 blocked（球在使用者）。
-#            卡不存在就建（task new 有同名去重）。恢復後由使用者撤標籤或關單。
+# 串的對照表：~/.local/state/taskwire/discord-threads.json（key → thread_id）。
+# 串被人刪掉（Discord 回 10003）就自動重開。webhook 若被換回一般文字頻道，
+# 開串會失敗（220003），此時退化成直接發頻道——通知永遠送得出去，只是不分串。
 #
+# GitLab 腿：固定卡「🤖 taskwire 系統健康」留言並掛 blocked（球在使用者）。
 # 兩條腿各自失敗都不阻斷另一條；全滅時訊息至少留在呼叫端的 log 裡。
 
 set -uo pipefail
 export PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin"
 
-# -d：只推 Discord，不動 GitLab 健康卡。日報與「球到你手上」這類例行通知用——
-# 健康卡留給真正的系統異常，不然 blocked 標籤會被日常訊息洗掉。
 discord_only=0
-[ "${1:-}" = "-d" ] && { discord_only=1; shift; }
-msg="${1:?用法：task-notify [-d] \"<訊息>\"}"
+kind="異常"
+while [ $# -gt 1 ]; do
+  case "$1" in
+    -d) discord_only=1; shift ;;
+    -t) kind="${2:?-t 要給類型}"; shift 2 ;;
+    *)  break ;;
+  esac
+done
+msg="${1:?用法：task-notify [-d] [-t 類型] \"<訊息>\"}"
 
-hook_file="$HOME/.config/taskwire/discord-webhook"
-# 討論串：~/.config/taskwire/discord-thread-id 放討論串 ID（開發者模式右鍵複製），
-# 有這個檔所有推播就集中進該討論串；沒有就落在頻道本身。
-# 之後要分類型分串，把這個檔擴成「類型→ID」的對照表即可，介面不用動。
-thread_file="$HOME/.config/taskwire/discord-thread-id"
-_hook_url() {
-  local url; url=$(< "$hook_file")
-  if [ -f "$thread_file" ]; then
-    case "$url" in *\?*) url="$url&thread_id=$(< "$thread_file")";;
-                   *)     url="$url?thread_id=$(< "$thread_file")";; esac
-  fi
-  printf '%s' "$url"
+HOOK_FILE="$HOME/.config/taskwire/discord-webhook"
+STATE="$HOME/.local/state/taskwire/discord-threads.json"
+
+_post() { # $1=URL $2=JSON；stdout 印 "HTTP碼<TAB>body"
+  curl -s -m 10 -w '\n%{http_code}' -X POST -H 'Content-Type: application/json' -d "$2" "$1" \
+    | { body=$(cat); printf '%s\t%s' "${body##*$'\n'}" "${body%$'\n'*}"; }
 }
-if [ -f "$hook_file" ]; then
-  if curl -s -m 10 -X POST -H "Content-Type: application/json" \
-       -d "$(jq -n --arg c "🔔 taskwire：$msg" '{content:$c}')" \
-       "$(_hook_url)" >/dev/null; then
-    echo "Discord 已通知"
-  else
-    echo "Discord 通知失敗（不阻斷）"
-  fi
-else
-  echo "（未設 Discord webhook：$hook_file 不存在，跳過推播）"
-fi
 
+_discord() {
+  [ -f "$HOOK_FILE" ] || { echo "（未設 Discord webhook：$HOOK_FILE 不存在，跳過推播）"; return 0; }
+  local url tid body resp code payload
+  url=$(< "$HOOK_FILE")
+  mkdir -p "$(dirname "$STATE")"; [ -f "$STATE" ] || echo '{}' > "$STATE"
+  tid=$(jq -r --arg k "$kind" '.[$k] // empty' "$STATE")
+
+  if [ -n "$tid" ]; then
+    body=$(jq -nc --arg c "$msg" '{content:$c}')
+    resp=$(_post "$url?wait=true&thread_id=$tid" "$body")
+    code=${resp%%$'\t'*}; payload=${resp#*$'\t'}
+    if [ "$code" = "200" ]; then echo "Discord 已通知（$kind → $tid）"; return 0; fi
+    if [ "$(jq -r '.code // empty' <<< "$payload" 2>/dev/null)" != "10003" ]; then
+      echo "Discord 通知失敗 HTTP $code（不阻斷）"; return 0
+    fi
+    echo "串 $tid 已不存在，重開…"
+  fi
+
+  body=$(jq -nc --arg t "taskwire · $kind" --arg c "$msg" '{thread_name:$t, content:$c}')
+  resp=$(_post "$url?wait=true" "$body")
+  code=${resp%%$'\t'*}; payload=${resp#*$'\t'}
+  if [ "$code" = "200" ]; then
+    tid=$(jq -r '.channel_id' <<< "$payload")
+    jq --arg k "$kind" --arg v "$tid" '.[$k] = $v' "$STATE" > "$STATE.tmp" && mv "$STATE.tmp" "$STATE"
+    echo "Discord 已通知（新開串 $kind → $tid）"
+  elif [ "$(jq -r '.code // empty' <<< "$payload" 2>/dev/null)" = "220003" ]; then
+    # webhook 掛的不是論壇頻道：退化成直接發頻道，不分串但不失聯。
+    _post "$url" "$(jq -nc --arg c "🔔 taskwire［$kind］$msg" '{content:$c}')" >/dev/null
+    echo "Discord 已通知（頻道非論壇，退化為不分串）"
+  else
+    echo "Discord 開串失敗 HTTP $code（不阻斷）"
+  fi
+}
+
+_discord
 [ "$discord_only" -eq 1 ] && exit 0
 
 TITLE="🤖 taskwire 系統健康"
