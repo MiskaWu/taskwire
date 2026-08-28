@@ -1,0 +1,17 @@
+# task-ui —— 本機控制台（常駐，例外經使用者拍板 2026-08-28）。
+# 這是繼 task-webhook 之後第二個常駐服務。拍板理由：控制台若做成按需啟動，
+# 它不會給無頭會話任何它沒有的能力（無頭 claude 手上有 Bash，本來就能改設定檔、
+# 跑 systemctl），所以「按需」保護不到任何東西，剩下的只有隨時可用這個實在的好處。
+#
+# 安裝：cp 到 ~/.config/systemd/user/ 後
+#   systemctl --user daemon-reload && systemctl --user enable --now task-ui
+[Unit]
+Description=taskwire 本機控制台（設定、觀測、唯讀單況）
+
+[Service]
+ExecStart=%h/projects/taskwire/bin/task-ui
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

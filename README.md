@@ -12,7 +12,9 @@
 | `bin/task-webhookd` | 常駐門鈴（:9587）。驗 GitLab signing token（Standard Webhooks 簽章），issue／work item／note 事件叫醒 dispatch。**門鈴不是資料來源**：payload 不進決策。 |
 | `bin/task-dispatch` | 無頭取件器。`flock` 防重入；`task next` 取件；起 `claude -p` 照協定做；退出後機械兜底——單子停在 doing 就補 block，永不留下「看起來有人在做、其實沒人在做」。 |
 | `bin/task-notify` | 系統級通知管道：Discord 推播（`~/.config/taskwire/discord-webhook`，選配）＋ GitLab「🤖 taskwire 系統健康」卡留痕掛 blocked。憑證失效、token 到期等異常都走這裡。 |
-| `systemd/` | user units：`task-webhook.service`（常駐）、`task-scan.timer`（每小時對帳，K8s 式 periodic resync，`Persistent=true`）。 |
+| `bin/task-ui` | 本機控制台（127.0.0.1:9588）。設定、密鑰、服務與排程、log、通知測試，加上**唯讀**的單況。拉 todo 與關單刻意沒有按鈕——理由跟 `bin/task` 裡沒有那兩個指令是同一個。頁面在 `ui/index.html`。 |
+| `bin/taskwire-config.sh`<br>`bin/taskwire_config.py` | 設定的單一真相（`~/.config/taskwire/config.env`）。bash 與 python 兩份實作同義，優先序都是**環境變數 > config.env > 內建預設**。旋鈕的目錄在 `taskwire_config.py` 的 `SETTINGS`，控制台的表單由它長出來。 |
+| `systemd/` | user units：`task-webhook.service`、`task-ui.service`（兩個常駐）、`task-scan.timer`（每小時對帳，K8s 式 periodic resync，`Persistent=true`）、`task-digest.timer`（每日日報）。另有 `task-ui.container`（podman quadlet，與 `task-ui.service` 二選一）。 |
 
 ## 安裝（新機器）
 
@@ -20,11 +22,31 @@
 ln -sf ~/projects/taskwire/bin/task ~/.local/bin/task
 mkdir -p ~/.config/taskwire ~/.local/state/taskwire
 # 密鑰：openssl rand -hex 32 > ~/.config/taskwire/webhook-secret && chmod 600 同檔
-cp systemd/* ~/.config/systemd/user/
+cp systemd/*.service systemd/*.timer ~/.config/systemd/user/
 systemctl --user daemon-reload
-systemctl --user enable --now task-webhook.service task-scan.timer
+systemctl --user enable --now task-webhook.service task-ui.service task-scan.timer task-digest.timer
 task doctor
 ```
+
+裝完開 <http://127.0.0.1:9588/>，其餘設定在頁面上轉。設定寫進
+`~/.config/taskwire/config.env`；排程改動寫成 systemd drop-in，
+所以之後再跑一次上面的 `cp` 也不會把調整洗掉。
+
+### 想用 podman 跑控制台
+
+```sh
+podman build -t taskwire-ui:latest -f Containerfile .
+mkdir -p ~/.config/containers/systemd
+cp systemd/task-ui.container ~/.config/containers/systemd/
+systemctl --user disable --now task-ui.service    # 與直跑版二選一，兩者搶同一個埠
+systemctl --user daemon-reload && systemctl --user start task-ui.service
+```
+
+先讀 `task-ui.container` 裡的掛載清單。它分成兩段：上半段是控制台的本業
+（自己的設定、狀態、repo），掛了不影響隔離；下半段每一行都是為了讓某顆按鈕
+真的按得動而交出去的宿主機能力——其中 `/run/user/<uid>` 給的是**整個 user
+systemd 的控制權**，不只 taskwire 的那幾個 unit。少給哪一項，對應功能會自動
+降級成在頁面上印指令給你複製，不會壞掉。
 
 GitLab 端：backlogs 專案 Settings → Webhooks，URL `http://<主機IP>:9587/hook`，
 Signing token 填密鑰檔內容，勾 Work item events 與 Comments。
@@ -38,3 +60,5 @@ Windows 防火牆放行 9587 入站。
   傷害邊界維持機械：關單不歸代理、worktree 不推 origin、token 輪替不由代理觸發。
 - 查詢失敗必須長得不像空清單——`_glab_json` 統一把關，別繞過它。
 - 代理留言一律帶 `🤖 [claude]` 前綴（`_note`），同帳號下的作者標記。
+- 控制台是設定與觀測，**單況唯讀**。不加拉 todo／關單按鈕——那道防線是協定性的
+  （每一處都說「這兩件不歸代理」），不是靠技術擋住的，所以一致性就是它的全部力量。

@@ -1,0 +1,677 @@
+#!/usr/bin/env python3
+"""task-ui —— taskwire 的本機控制台（2026-08-28 拍板）。
+
+**範圍是拍板過的**：設定、觀測，加上唯讀的單況。刻意不含「拉 todo」與「關單」——
+不是因為技術上擋不住（無頭 claude 手上有 Bash，它要關單根本不需要經過這裡），
+而是因為那道防線是協定性的：`task help`、SKILL.md、這個控制台，每一處都說
+「這兩件不歸代理」，模型才不會誤讀成授權。控制台上擺一顆關單按鈕，等於從
+內部把那道一致性拆掉。要加就先改設計。
+
+**宿主機動作會自動降級。** 開關服務、調排程、讀 journal 都要碰得到 user systemd
+的 D-Bus。碰得到就直接執行；碰不到（典型情況：跑在沒 mount /run/user/<uid>/bus
+的 podman 容器裡）就把該跑的指令原樣回給頁面，由使用者貼到終端機。同一份程式碼
+兩種部署都能用，容器模式只是某些動作從「幫你做」變成「給你指令」。
+
+**查詢失敗必須長得不像空清單**（設計拍板三號）在這裡的落實：每個 API 一律回
+{"ok": bool, ...}，失敗時帶 error 字串。前端在 ok=false 時顯示錯誤區塊，
+絕不渲染成空表格——token 過期那天，單況面板要說「連不上」，不能說「沒有單」。
+
+只綁 127.0.0.1。仍然驗 Host 標頭（擋 DNS rebinding：外部網頁把某網域解析到
+127.0.0.1 之後就能對本服務發請求），寫入動作另外要求一個自訂標頭——
+HTML 表單發不出自訂標頭，跨站的 fetch 帶自訂標頭會先觸發 preflight 而被擋下。
+"""
+
+import json
+import os
+import re
+import secrets
+import shutil
+import subprocess
+import sys
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlparse, parse_qs
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import taskwire_config as cfg  # noqa: E402
+
+REPO_DIR = os.environ.get(
+    "TASKWIRE_REPO_DIR",
+    os.path.dirname(os.path.dirname(os.path.realpath(__file__))),
+)
+UI_DIR = os.path.join(REPO_DIR, "ui")
+SYSTEMD_USER_DIR = os.path.expanduser("~/.config/systemd/user")
+CSRF_HEADER = "X-Taskwire-UI"
+
+# 控制台能碰的 unit 白名單。不在名單上的一律拒絕——這個服務不是通用的
+# systemd 遙控器，它只管 taskwire 自己的東西。
+UNITS = {
+    "task-webhook.service": {
+        "label": "門鈴（webhook）",
+        "kind": "service",
+        "help": "收 GitLab 事件、驗簽章，然後往門鈴信箱投紙條——起 dispatch 的職責"
+                "歸下面的信箱監看。跑在 podman（quadlet）時改 bin/task-webhookd 要"
+                "重 build 映像。停掉之後改單不會即時觸發，要等對帳 timer 補。",
+    },
+    "task-doorbell.path": {
+        "label": "門鈴信箱監看",
+        "kind": "path",
+        "help": "systemd 盯著 doorbell 信箱目錄，紙條一出現就起 task-dispatch；"
+                "dispatch 收工時信箱還有紙條會自動再起（接力）。這是門鈴容器"
+                "唯一碰得到宿主機的通道。",
+    },
+    "task-scan.timer": {
+        "label": "對帳輪詢（每小時）",
+        "kind": "timer",
+        "help": "webhook 漏接時的保底，跑一次 task-dispatch。K8s 式的 periodic resync。",
+    },
+    "task-digest.timer": {
+        "label": "每日巡檢日報",
+        "kind": "timer",
+        "help": "球權、在途、系統健康，零 LLM。日報同時是巡檢自己的心跳——"
+                "靜默的巡檢壞掉時沒有人會發現。雲端早報上線後內容與它重疊，"
+                "拍板做法（2026-08-28）：啟用早報時按「取消自啟」把這個關掉；"
+                "關掉後「巡檢還活著嗎」的心跳職責就移交給早報，早報那側要記得接。",
+    },
+    "task-ui.service": {
+        "label": "控制台（就是這一頁）",
+        "kind": "service",
+        "help": "重啟會讓這一頁斷線幾秒，重新整理即可。",
+    },
+}
+
+LOG_FILE_RE = re.compile(r"^(dispatch\.log|run-[0-9]{8}-[0-9]{6}-[0-9]+\.log)$")
+ONCALENDAR_RE = re.compile(r"^[-*0-9 ,/:.]+$|^(hourly|daily|weekly|monthly)$")
+SKILL_MARK = "## 判斷提示"
+
+_issues_cache = {"at": 0.0, "payload": None}
+
+
+def run(cmd, timeout=30, env=None):
+    """跑一個外部指令，回 (rc, 合併輸出)。永遠不丟例外——
+    控制台的每一格都可能失敗，失敗要變成畫面上的一段紅字，不是 500。"""
+    merged = dict(os.environ)
+    if env:
+        merged.update(env)
+    try:
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=timeout, env=merged
+        )
+        return proc.returncode, (proc.stdout + proc.stderr).strip()
+    except subprocess.TimeoutExpired:
+        return 124, f"逾時（{timeout} 秒）：{' '.join(cmd)}"
+    except FileNotFoundError:
+        return 127, f"找不到指令：{cmd[0]}"
+    except OSError as exc:
+        return 1, f"{exc}"
+
+
+_systemd_ok = None
+_systemd_env = {}
+
+
+def systemd_available() -> bool:
+    """能不能碰到 user systemd，以及要用哪條路連。探一次就記住。
+
+    有兩條路：systemctl 預設走 /run/user/<uid>/systemd/private 這個私有 socket，
+    走不通才有 D-Bus。在容器裡（即使 uid 相同、socket 也 mount 進去了）private
+    這條必定失敗——systemd 對它有跨 namespace 過不了的對端檢查，錯誤訊息是
+    「Failed to connect to user scope bus via local transport: No data available」，
+    看起來像「systemd 不在」，實際上只是走錯門。SYSTEMCTL_FORCE_BUS=1 改走 D-Bus
+    就完全正常（2026-08-28 在 podman rootless 實測）。
+
+    所以這裡探兩次：直連不行就帶 FORCE_BUS 再探一次，成功就把它記進 _systemd_env，
+    之後所有 systemctl 呼叫都帶著。直跑的宿主機第一次就會過，不會多付這個成本。
+    """
+    global _systemd_ok, _systemd_env
+    if _systemd_ok is None:
+        probe = ["systemctl", "--user", "show", "--property=Version"]
+        if not shutil.which("systemctl"):
+            _systemd_ok = False
+        elif run(probe, timeout=5)[0] == 0:
+            _systemd_ok, _systemd_env = True, {}
+        elif run(probe, timeout=5, env={"SYSTEMCTL_FORCE_BUS": "1"})[0] == 0:
+            _systemd_ok, _systemd_env = True, {"SYSTEMCTL_FORCE_BUS": "1"}
+        else:
+            _systemd_ok = False
+    return _systemd_ok
+
+
+def sysctl(cmd, timeout=30):
+    """所有 systemctl／journalctl 呼叫都走這裡，才會帶上探測出來的連線方式。"""
+    systemd_available()
+    return run(cmd, timeout=timeout, env=_systemd_env)
+
+
+def host_action(cmd, why=""):
+    """需要宿主機權限的動作。碰得到 systemd 就直接做；碰不到就把指令交回頁面。
+    這個降級不只為了容器——像 claude /login 這種本來就只能由人在終端機做的事，
+    走的也是同一條路。"""
+    if not systemd_available():
+        return {
+            "ok": False,
+            "manual": " ".join(cmd),
+            "error": "這個環境碰不到 user systemd（典型是跑在沒 mount D-Bus 的容器裡）。"
+                     "把下面這行貼到終端機執行：" + (f"（{why}）" if why else ""),
+        }
+    rc, out = sysctl(cmd, timeout=60)
+    if rc != 0:
+        return {"ok": False, "error": out or f"指令失敗（rc={rc}）", "manual": " ".join(cmd)}
+    return {"ok": True, "output": out}
+
+
+def unit_state(name: str) -> dict:
+    """一個 unit 的現況。systemd 碰不到時回 unknown 而不是編一個 inactive——
+    「不知道」和「停著」在畫面上必須長得不一樣。"""
+    info = dict(UNITS[name])
+    info["name"] = name
+    if name == "task-webhook.service" and not cfg.read_secret("webhook-secret"):
+        info["note"] = ("webhook 密鑰未設定——門鈴不會啟動（unit 的 ConditionPathExists "
+                        "安靜擋下，這是設計不是故障）。要接 GitLab 就到下方密鑰區設定後"
+                        "再啟動；不接的機器靠對帳 timer 每小時輪巡就夠，只是慢。")
+    if not systemd_available():
+        info.update(active="unknown", enabled="unknown", detail="碰不到 systemd")
+        return info
+    rc, out = sysctl(
+        ["systemctl", "--user", "show", name,
+         "--property=ActiveState,UnitFileState,SubState,ExecMainStartTimestamp"],
+        timeout=10,
+    )
+    props = {}
+    if rc == 0:
+        for line in out.splitlines():
+            if "=" in line:
+                key, _, val = line.partition("=")
+                props[key] = val
+    info["active"] = props.get("ActiveState", "unknown")
+    info["enabled"] = props.get("UnitFileState", "unknown")
+    info["sub"] = props.get("SubState", "")
+    info["since"] = props.get("ExecMainStartTimestamp", "")
+    if name.endswith(".timer"):
+        rc2, out2 = sysctl(
+            ["systemctl", "--user", "show", name,
+             "--property=NextElapseUSecRealtime,TimersCalendar"], timeout=10)
+        if rc2 == 0:
+            for line in out2.splitlines():
+                key, _, val = line.partition("=")
+                if key == "NextElapseUSecRealtime":
+                    info["next"] = val
+                elif key == "TimersCalendar":
+                    m = re.search(r"OnCalendar=([^ ;}]+(?: [^ ;}]+)*)", val)
+                    info["oncalendar"] = m.group(1).strip() if m else val
+    return info
+
+
+def dropin_path(unit: str) -> str:
+    return os.path.join(SYSTEMD_USER_DIR, unit + ".d", "override.conf")
+
+
+def read_dropin(unit: str) -> str:
+    try:
+        with open(dropin_path(unit), encoding="utf-8") as fh:
+            return fh.read()
+    except OSError:
+        return ""
+
+
+def write_schedule(unit: str, oncalendar: str) -> dict:
+    """排程改動寫 drop-in，不動 unit 檔本體。
+    repo 的 systemd/ 是源、~/.config/systemd/user/ 是複本（見 CLAUDE.md），
+    直接改複本的話，下次照 README 跑 cp 就會把這裡的調整默默洗掉。
+    drop-in 是 systemd 為這個情境準備的機制：cp 蓋不到它，源檔永遠是出廠值。
+    OnCalendar= 先給一行空值是必要的——不清空的話新值是疊加上去，變成兩個排程點。"""
+    path = dropin_path(unit)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    body = (
+        "# 由 task-ui 產生。repo 的 systemd/ 是出廠值，這個 drop-in 疊在它上面。\n"
+        "# 手改也可以；要回到出廠值就刪掉這個檔再 daemon-reload。\n"
+        "[Timer]\n"
+        "OnCalendar=\n"
+        f"OnCalendar={oncalendar}\n"
+    )
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(body)
+    res = host_action(["systemctl", "--user", "daemon-reload"], "讓 drop-in 生效")
+    if not res["ok"]:
+        return res
+    return host_action(["systemctl", "--user", "restart", unit], "套用新排程")
+
+
+def read_skill_hints() -> dict:
+    """SKILL.md 的判斷提示區塊。設計拍板一號指定它是調整模型行為的唯一手段
+    （不准加機械閘門），所以它算旋鈕，該在控制台上轉得動。"""
+    path = os.path.join(REPO_DIR, "skill", "SKILL.md")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError as exc:
+        return {"ok": False, "error": f"讀不到 {path}：{exc}"}
+    idx = text.find(SKILL_MARK)
+    if idx < 0:
+        return {"ok": False, "error": f"SKILL.md 裡找不到「{SKILL_MARK}」段落"}
+    head_end = text.find("\n", idx)
+    section = text[head_end + 1:]
+    return {"ok": True, "heading": text[idx:head_end], "body": section.strip(), "path": path}
+
+
+def write_skill_hints(body: str) -> dict:
+    cur = read_skill_hints()
+    if not cur["ok"]:
+        return cur
+    with open(cur["path"], encoding="utf-8") as fh:
+        text = fh.read()
+    idx = text.find(SKILL_MARK)
+    head_end = text.find("\n", idx)
+    new = text[:head_end + 1] + "\n" + body.strip() + "\n"
+    tmp = cur["path"] + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.write(new)
+    os.replace(tmp, cur["path"])
+    return {"ok": True}
+
+
+def issues_snapshot(force=False) -> dict:
+    """單況（唯讀）。快取 30 秒——這一頁會被反覆重新整理，
+    每次都打一輪 GitLab API 既慢又浪費配額。
+    失敗一律回 ok=False 帶原始錯誤，絕不回空清單。"""
+    now = time.time()
+    if not force and _issues_cache["payload"] and now - _issues_cache["at"] < 30:
+        return _issues_cache["payload"]
+    repo = cfg.effective()["TASK_REPO"]
+    rc, out = run(
+        ["glab", "issue", "list", "-R", repo, "--output", "json", "-P", "100"],
+        timeout=45,
+    )
+    if rc != 0:
+        payload = {
+            "ok": False,
+            "error": "glab 查詢失敗（這不是「沒有單」，是查詢根本沒成功）：\n" + out,
+        }
+        _issues_cache.update(at=now, payload=payload)
+        return payload
+    try:
+        raw = json.loads(out)
+    except json.JSONDecodeError:
+        payload = {"ok": False, "error": "glab 回的不是 JSON：\n" + out[:2000]}
+        _issues_cache.update(at=now, payload=payload)
+        return payload
+    flow = ("todo", "doing", "blocked", "done")
+    buckets = {name: [] for name in flow}
+    buckets["inbox"] = []
+    for item in raw:
+        labels = item.get("labels") or []
+        row = {
+            "iid": item.get("iid"),
+            "title": item.get("title", ""),
+            "url": item.get("web_url", ""),
+            "labels": labels,
+            "updated_at": item.get("updated_at", ""),
+        }
+        placed = False
+        for name in flow:
+            if name in labels:
+                buckets[name].append(row)
+                placed = True
+        if not placed:
+            buckets["inbox"].append(row)
+    payload = {"ok": True, "buckets": buckets, "total": len(raw), "repo": repo,
+               "fetched_at": time.strftime("%H:%M:%S")}
+    _issues_cache.update(at=now, payload=payload)
+    return payload
+
+
+def list_run_logs():
+    try:
+        names = [n for n in os.listdir(cfg.STATE_DIR) if LOG_FILE_RE.match(n)]
+    except OSError:
+        return []
+    names.sort(reverse=True)
+    return names[:40]
+
+
+def read_log(name: str, lines: int) -> dict:
+    """只讀 STATE_DIR 底下、名字符合白名單樣式的檔。
+    路徑不接受任何目錄成分——這是本機服務，但路徑穿越沒有便宜可佔。"""
+    if not LOG_FILE_RE.match(name):
+        return {"ok": False, "error": f"不是可讀的 log 檔名：{name}"}
+    path = os.path.join(cfg.STATE_DIR, name)
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            content = fh.readlines()
+    except OSError as exc:
+        return {"ok": False, "error": f"讀不到 {name}：{exc}"}
+    return {"ok": True, "name": name, "text": "".join(content[-lines:]),
+            "truncated": len(content) > lines, "total_lines": len(content)}
+
+
+def journal(unit: str, lines: int) -> dict:
+    if unit not in UNITS:
+        return {"ok": False, "error": f"不在白名單上的 unit：{unit}"}
+    if not systemd_available():
+        return {"ok": False,
+                "manual": f"journalctl --user -u {unit} -n {lines} --no-pager",
+                "error": "碰不到 systemd，journal 讀不到。到終端機跑："}
+    rc, out = sysctl(["journalctl", "--user", "-u", unit, "-n", str(lines),
+                      "--no-pager"], timeout=20)
+    if rc != 0:
+        return {"ok": False, "error": out}
+    return {"ok": True, "text": out}
+
+
+def base_state() -> dict:
+    on_disk = cfg.read_file()
+    eff = cfg.effective()
+    settings = []
+    for item in cfg.SETTINGS:
+        key = item["key"]
+        settings.append({
+            **item,
+            "value": on_disk.get(key, ""),
+            "effective": eff[key],
+            "source": cfg.source_of(key),
+        })
+    secrets_state = []
+    for item in cfg.SECRETS:
+        val = cfg.read_secret(item["name"])
+        path = cfg.secret_path(item["name"])
+        try:
+            mode = oct(os.stat(path).st_mode & 0o777)
+        except OSError:
+            mode = None
+        secrets_state.append({
+            **item,
+            "present": bool(val),
+            "length": len(val),
+            "hint": (val[:4] + "…" + val[-4:]) if len(val) > 12 else ("已設定" if val else ""),
+            "path": path,
+            "mode": mode,
+        })
+    threads = {}
+    try:
+        with open(os.path.join(cfg.STATE_DIR, "discord-threads.json"),
+                  encoding="utf-8") as fh:
+            threads = json.load(fh)
+    except (OSError, json.JSONDecodeError):
+        pass
+    return {
+        "ok": True,
+        "settings": settings,
+        "secrets": secrets_state,
+        "units": [unit_state(name) for name in UNITS],
+        "systemd": systemd_available(),
+        "threads": threads,
+        "run_logs": list_run_logs(),
+        "config_path": cfg.CONFIG_PATH,
+        "state_dir": cfg.STATE_DIR,
+        "repo_dir": REPO_DIR,
+        "webhook_url_hint": f":{cfg.effective()['TASK_WEBHOOK_PORT']}/hook",
+    }
+
+
+class Handler(BaseHTTPRequestHandler):
+    server_version = "task-ui"
+
+    def log_message(self, *_args):
+        pass
+
+    # —— 基礎回應 ——
+    def _send(self, code, body: bytes, ctype="application/json; charset=utf-8"):
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        try:
+            self.wfile.write(body)
+        except BrokenPipeError:
+            pass
+
+    def _json(self, payload, code=200):
+        self._send(code, json.dumps(payload, ensure_ascii=False).encode("utf-8"))
+
+    def _host_ok(self) -> bool:
+        """擋 DNS rebinding：外部網站把自己的網域指到 127.0.0.1 之後，
+        使用者的瀏覽器就會拿著那個網域對本服務發請求。只認回環的主機名。
+
+        nip.io 的固定回環名（127-0-0-1.nip.io）也放行——WSL 桌面板從對話裡開連結
+        走的是這個形式，擋掉的話點進來只會看到 403。放行它不等於放棄防線：
+        那個名字永遠解析到 127.0.0.1，不是攻擊者控制的網域（rebinding 靠的正是
+        攻擊者能改自己網域的解析）。真正擋住惡意頁面的是同源政策——本服務不回
+        任何 CORS 標頭，跨來源的讀取拿不到回應，寫入所需的自訂標頭會先觸發
+        preflight 而失敗。Host 檢查是外面那一層。"""
+        host = (self.headers.get("Host") or "").split(":")[0].strip("[]").lower()
+        return host in ("127.0.0.1", "localhost", "::1", "",
+                        "127-0-0-1.nip.io", "localhost.nip.io")
+
+    def _write_ok(self) -> bool:
+        """寫入動作的額外門檻。HTML 表單送不出自訂標頭，跨站 fetch 帶自訂標頭
+        會先觸發 preflight 而被同源政策擋下——所以這一個標頭就足以擋掉
+        「使用者剛好開著某個惡意分頁」這條路。"""
+        return self.headers.get(CSRF_HEADER) == "1"
+
+    def do_GET(self):  # noqa: N802
+        if not self._host_ok():
+            self._send(403, b"forbidden\n", "text/plain; charset=utf-8")
+            return
+        parsed = urlparse(self.path)
+        path, query = parsed.path, parse_qs(parsed.query)
+        if path in ("/", "/index.html"):
+            self._serve_page()
+        elif path == "/api/state":
+            self._json(base_state())
+        elif path == "/api/issues":
+            self._json(issues_snapshot(force=query.get("force", ["0"])[0] == "1"))
+        elif path == "/api/doctor":
+            rc, out = run(["task", "doctor"], timeout=90)
+            self._json({"ok": rc == 0, "text": out,
+                        "error": "" if rc == 0 else "task doctor 回報有問題（內容在下面）"})
+        elif path == "/api/healthz":
+            port = cfg.effective()["TASK_WEBHOOK_PORT"]
+            rc, out = run(["curl", "-s", "-m", "5",
+                           f"http://127.0.0.1:{port}/healthz"], timeout=10)
+            self._json({"ok": rc == 0 and out.strip() == "ok",
+                        "text": out or "（沒有回應）",
+                        "error": "" if rc == 0 else f"門鈴 :{port} 沒有回應"})
+        elif path == "/api/log":
+            self._json(read_log(query.get("name", ["dispatch.log"])[0],
+                                int(query.get("lines", ["300"])[0])))
+        elif path == "/api/journal":
+            self._json(journal(query.get("unit", ["task-webhook.service"])[0],
+                               int(query.get("lines", ["60"])[0])))
+        elif path == "/api/skill":
+            self._json(read_skill_hints())
+        elif path == "/api/secret":
+            # 明文密鑰要顯式索取，不隨 /api/state 一起送——頁面預設是遮蔽的。
+            name = query.get("name", [""])[0]
+            if name not in {s["name"] for s in cfg.SECRETS}:
+                self._json({"ok": False, "error": f"沒有這個密鑰：{name}"}, 400)
+                return
+            self._json({"ok": True, "name": name, "value": cfg.read_secret(name)})
+        else:
+            self._send(404, b"not found\n", "text/plain; charset=utf-8")
+
+    def do_POST(self):  # noqa: N802
+        if not self._host_ok():
+            self._send(403, b"forbidden\n", "text/plain; charset=utf-8")
+            return
+        if not self._write_ok():
+            self._json({"ok": False, "error": f"缺少 {CSRF_HEADER} 標頭，拒絕寫入。"}, 403)
+            return
+        length = int(self.headers.get("Content-Length", "0") or "0")
+        raw = self.rfile.read(min(length, 1 << 20))
+        try:
+            body = json.loads(raw or b"{}")
+        except json.JSONDecodeError:
+            self._json({"ok": False, "error": "請求不是合法 JSON"}, 400)
+            return
+        path = urlparse(self.path).path
+        try:
+            self._dispatch_post(path, body)
+        except Exception as exc:  # noqa: BLE001 —— 控制台不該因為單一動作出錯就掛掉
+            self._json({"ok": False, "error": f"{type(exc).__name__}: {exc}"}, 500)
+
+    def _dispatch_post(self, path, body):
+        if path == "/api/config":
+            values = body.get("values") or {}
+            merged = cfg.read_file()
+            for key, val in values.items():
+                if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", key):
+                    self._json({"ok": False, "error": f"不合法的設定名：{key}"}, 400)
+                    return
+                text = str(val).strip()
+                if "\n" in text:
+                    self._json({"ok": False, "error": f"{key} 不能含換行"}, 400)
+                    return
+                if text:
+                    merged[key] = text
+                else:
+                    merged.pop(key, None)  # 清空＝回到內建預設
+            cfg.write_file(merged)
+            shadowed = [k for k in values if os.environ.get(k)]
+            need = sorted({u for s in cfg.SETTINGS if s["key"] in values
+                           for u in s["restart"]})
+            self._json({"ok": True, "restart_needed": need, "shadowed": shadowed})
+
+        elif path == "/api/secret":
+            name = body.get("name")
+            if name not in {s["name"] for s in cfg.SECRETS}:
+                self._json({"ok": False, "error": f"沒有這個密鑰：{name}"}, 400)
+                return
+            cfg.write_secret(name, str(body.get("value", "")))
+            self._json({"ok": True,
+                        "restart_needed": ["task-webhook.service"]
+                        if name == "webhook-secret" else []})
+
+        elif path == "/api/secret/generate":
+            if body.get("name") != "webhook-secret":
+                self._json({"ok": False, "error": "只有 webhook-secret 能自動產生"}, 400)
+                return
+            value = secrets.token_hex(32)
+            cfg.write_secret("webhook-secret", value)
+            self._json({"ok": True, "value": value,
+                        "restart_needed": ["task-webhook.service"]})
+
+        elif path == "/api/service":
+            unit, action = body.get("unit"), body.get("action")
+            if unit not in UNITS:
+                self._json({"ok": False, "error": f"不在白名單上的 unit：{unit}"}, 400)
+                return
+            if action not in ("start", "stop", "restart", "enable", "disable"):
+                self._json({"ok": False, "error": f"不允許的動作：{action}"}, 400)
+                return
+            cmd = ["systemctl", "--user", action, unit]
+            if action in ("enable", "disable"):
+                cmd.insert(3, "--now")
+            self._json(host_action(cmd, f"{action} {unit}"))
+
+        elif path == "/api/schedule":
+            unit, when = body.get("unit"), str(body.get("oncalendar", "")).strip()
+            if unit not in UNITS or not unit.endswith(".timer"):
+                self._json({"ok": False, "error": f"不是可調排程的 timer：{unit}"}, 400)
+                return
+            if not when or not ONCALENDAR_RE.match(when):
+                self._json({"ok": False,
+                            "error": "OnCalendar 格式看起來不對。例：hourly、daily、"
+                                     "*-*-* 09:00、Mon..Fri *-*-* 08:30"}, 400)
+                return
+            rc, out = run(["systemd-analyze", "calendar", when], timeout=10)
+            if rc != 0:
+                self._json({"ok": False,
+                            "error": f"systemd 不接受這個排程式：\n{out}"}, 400)
+                return
+            res = write_schedule(unit, when)
+            res["parsed"] = out
+            self._json(res)
+
+        elif path == "/api/schedule/reset":
+            unit = body.get("unit")
+            if unit not in UNITS:
+                self._json({"ok": False, "error": f"不在白名單上的 unit：{unit}"}, 400)
+                return
+            path_ = dropin_path(unit)
+            if os.path.exists(path_):
+                os.remove(path_)
+                try:
+                    os.rmdir(os.path.dirname(path_))
+                except OSError:
+                    pass
+            self._json(host_action(["systemctl", "--user", "daemon-reload"],
+                                   "回到 repo 的出廠排程"))
+
+        elif path == "/api/notify-test":
+            kind = str(body.get("kind", "異常")).strip() or "異常"
+            msg = str(body.get("message", "")).strip() or "控制台測試訊息"
+            # 一律加 -d：測試訊息不該掛 GitLab 健康卡，那張卡留給真異常。
+            rc, out = run(["task-notify", "-d", "-t", kind, msg], timeout=30)
+            self._json({"ok": rc == 0, "text": out,
+                        "error": "" if rc == 0 else "task-notify 失敗（輸出在下面）"})
+
+        elif path == "/api/threads/reset":
+            path_ = os.path.join(cfg.STATE_DIR, "discord-threads.json")
+            key = body.get("key")
+            try:
+                with open(path_, encoding="utf-8") as fh:
+                    data = json.load(fh)
+            except (OSError, json.JSONDecodeError):
+                data = {}
+            if key:
+                data.pop(key, None)
+            else:
+                data = {}
+            with open(path_, "w", encoding="utf-8") as fh:
+                json.dump(data, fh, ensure_ascii=False)
+            self._json({"ok": True, "threads": data})
+
+        elif path == "/api/skill":
+            self._json(write_skill_hints(str(body.get("body", ""))))
+
+        elif path == "/api/dispatch/run":
+            # 手動叫醒 dispatch。它自己有 flock，忙碌中會直接跳過，按幾次都安全。
+            # 注意這不是「指派工作」——dispatch 用 task next 重讀真實狀態決定做什麼，
+            # 這裡只是提早按一次門鈴。
+            script = os.path.join(REPO_DIR, "bin", "task-dispatch")
+            log_path = os.path.join(cfg.STATE_DIR, "dispatch.log")
+            os.makedirs(cfg.STATE_DIR, exist_ok=True)
+            with open(log_path, "ab") as out:
+                subprocess.Popen([script], stdout=out, stderr=out,
+                                 start_new_session=True)
+            self._json({"ok": True, "text": "已叫醒 dispatch，進度看 dispatch.log。"})
+
+        else:
+            self._json({"ok": False, "error": f"沒有這個端點：{path}"}, 404)
+
+    def _serve_page(self):
+        path = os.path.join(UI_DIR, "index.html")
+        try:
+            with open(path, "rb") as fh:
+                body = fh.read()
+        except OSError as exc:
+            self._send(500, f"讀不到頁面 {path}：{exc}\n".encode(),
+                       "text/plain; charset=utf-8")
+            return
+        self._send(200, body, "text/html; charset=utf-8")
+
+
+def main() -> int:
+    eff = cfg.effective()
+    bind = eff["TASK_UI_BIND"]
+    port = int(eff["TASK_UI_PORT"])
+    # 在容器裡綁 0.0.0.0 是正常的——podman 的 PublishPort 已經把它限制在
+    # 宿主機的 127.0.0.1，容器內再綁回環反而連不進來。只有直跑時才該警告。
+    in_container = os.path.exists("/run/.containerenv") or os.path.exists("/.dockerenv")
+    if bind not in ("127.0.0.1", "localhost", "::1") and not in_container:
+        print(f"⚠ 綁在 {bind}：這一頁有 webhook 密鑰與服務控制權，而且是 http 明文。",
+              flush=True)
+    server = ThreadingHTTPServer((bind, port), Handler)
+    print(f"task-ui 監聽 http://{bind}:{port}/"
+          f"（systemd {'可用' if systemd_available() else '碰不到，宿主機動作會降級成給指令'}）",
+          flush=True)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("收工。", flush=True)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
