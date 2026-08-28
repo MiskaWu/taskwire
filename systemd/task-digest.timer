@@ -1,0 +1,10 @@
+# 每天 09:00；Persistent=true 讓睡過排程點的 WSL 醒來補跑。
+[Unit]
+Description=taskwire 每日巡檢 timer
+
+[Timer]
+OnCalendar=*-*-* 09:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

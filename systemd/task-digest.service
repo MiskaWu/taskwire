@@ -1,0 +1,7 @@
+# task-digest —— 每日巡檢日報（球權、在途、系統健康），零 LLM。
+[Unit]
+Description=taskwire 每日巡檢日報
+
+[Service]
+Type=oneshot
+ExecStart=%h/projects/taskwire/bin/task-digest
