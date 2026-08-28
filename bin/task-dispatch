@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+# task-dispatch —— 無頭取件器。webhook（門鈴）與可選的對帳 timer 都打這裡。
+#
+# 一次處理一張單：task next 取件 → 起無頭 claude 照協定做 → 機械兜底。
+# 兩層寫回（設計文件「C 檔施工規格」）：
+#   協定層：提示告訴模型——做完 task done、卡住 task block，沒有人會回你。
+#   兜底層：claude 退出後檢查單子最終狀態，還停在 doing 就補 block。
+#     不管模型行為如何，單子永遠不會停在「看起來有人在做、其實沒人在做」。
+#
+# 冪等與防遞迴：
+#   - flock -n：忙碌中再被門鈴叫醒就直接退出。無頭會話自己動標籤會再觸發
+#     webhook → 新的 dispatch → 被這把鎖擋掉，不會滾雪球。
+#   - 做完一張後不主動連做：done 的標籤變更會再響一次門鈴，自然接力下一張。
+#   - TASK_HEADLESS=1 傳進 claude，讓 hook 鏈知道自己在無頭情境。
+#
+# 權限：無頭 claude 讀同一份 settings.json（auto mode 照常）。沙箱外的動作
+# 在互動時是問人，這裡是自動拒絕——模型收到拒絕訊息後照協定 block。
+# 刻意不用 --dangerously-skip-permissions：不在沒人看著的時候拆最後把關。
+
+set -euo pipefail
+export PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin"
+
+STATE_DIR="$HOME/.local/state/taskwire"
+LOCK="$STATE_DIR/dispatch.lock"
+TIMEOUT="${TASK_DISPATCH_TIMEOUT:-3600}"   # 秒。防「做錯方向做一整夜」。
+mkdir -p "$STATE_DIR"
+
+exec 9>"$LOCK"
+flock -n 9 || { echo "dispatch 已在跑，跳過（$(date '+%F %T')）"; exit 0; }
+
+echo "=== dispatch $(date '+%F %T') ==="
+
+# 取件。task next 失敗（API 掛了）會大聲退出非零——這裡不吞，讓 log 留紀錄。
+next_out=$(task next)
+echo "$next_out"
+iid=$(grep -oE '#[0-9]+' <<< "$next_out" | head -1 | tr -d '#') || true
+[ -n "${iid:-}" ] || { echo "沒有可接的單，收工。"; exit 0; }
+
+run_log="$STATE_DIR/run-$(date +%Y%m%d-%H%M%S)-$iid.log"
+echo "處理 #$iid，claude log → $run_log"
+
+prompt=$(cat <<PROMPT
+你在無頭會話（webhook 觸發的 backlog 取件），沒有人會回你的問題。
+目標：處理 backlog 單 #$iid（task 指令已在 PATH，倉庫是內部 GitLab 的 docs/backlogs）。
+
+協定，依序執行：
+1. task show $iid 讀單，理解 why、現況、驗收條件。
+2. task start $iid "開工摘要" 接手。驗收條件由你判斷：單上有就照它；
+   沒有就依需求自己擬一份可檢查的，先 task note 留在單上再動工；
+   需求模糊到你擬不出可檢查的條件，就 task block 問。
+3. 動手做。工作落地的 repo 與位置以單上寫的為準——單上看不出落哪裡就
+   task block 問，不要自己猜一個地方放。程式改動一律在目標 repo 的
+   worktree 進行，完成要 commit；不推 origin（push guard 會擋，這是設計不是障礙）。
+4. 任何沒把握的點——驗收看不懂、要做設計取捨、權限被拒又繞不開——
+   不要猜：task block $iid "卡在哪＋你的建議"，然後結束。
+5. 做完且依驗收條件自檢通過：task done $iid "交件摘要＋你怎麼驗的"。
+6. 邊界：不關單、不動其他單的狀態、不碰 todo 的拉入。
+PROMPT
+)
+
+rc=0
+TASK_HEADLESS=1 timeout "$TIMEOUT" \
+  claude -p "$prompt" >"$run_log" 2>&1 || rc=$?
+echo "claude 退出 rc=$rc"
+
+# 機械兜底：模型沒機會寫回的死法（timeout=124、斷線、被殺）都落到這裡。
+labels=$(glab issue view "$iid" -R "gitlab.dev.baasgames.com/hydrogen/roles/engineer/miskawu/docs/backlogs" \
+           --output json 2>/dev/null | jq -r '[.labels[]?] | join(" ")' || echo "")
+case " $labels " in
+  *" doing "*)
+    echo "兜底：#$iid 停在 doing，補 block。"
+    task block "$iid" "無頭會話異常結束（exit=$rc），沒能自行交件或報卡。log：$run_log，需要人看。" \
+      || echo "兜底 block 也失敗了——API 可能整個不通，留給 log。"
+    ;;
+  *)
+    echo "#$iid 最終狀態：${labels:-（無標籤）}，不需兜底。"
+    ;;
+esac
+echo "=== dispatch 結束 $(date '+%F %T')（exit=$rc）==="

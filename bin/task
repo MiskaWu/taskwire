@@ -1,0 +1,288 @@
+#!/usr/bin/env bash
+# task —— backlog 的指令列入口。把「標籤」變成可以被指令驅動的狀態機（v2）。
+#
+# v2 語意（2026-08-27 拍板，設計討論見 artifact「Backlog 接線設計」）：
+#   收集   ＝ 沒有標籤。task new 落在這；缺席本身就是狀態，不開標籤。
+#   todo   ＝ 使用者想好、談好之後丟進來的佇列。「進了 todo」本身就是授權。
+#   doing  ＝ 動手中（task start）。blocked ＝ 卡住等回話（task block）。
+#   done   ＝ 做完等驗收（task done）。封存 ＝ 關單，不開標籤。
+#
+# 硬規則不變：**這支腳本只包含它的執行者被允許做的動作**。
+# 「拉 todo」（授權）與「關單」（驗收）是使用者的動作，這裡刻意沒有指令
+# ——指令的缺席就是「這個動作不歸代理」的文件，`task help` 印出原始 glab 指令。
+#
+# 帳務不變量（機械檢查，刻意不含任何智能判斷）：
+#   - 一張單一次只掛一個流程標籤。所有轉移走 _set_state，貼一個拿掉其餘。
+#   -（2026-08-28 拍板：**移除**驗收閘門。）start 曾要求單上有「驗收：」才放行，
+#     使用者判定這類機械檢查會綁住進步中的模型能力——驗收有沒有、擬得好不好，
+#     交給模型判斷與使用者磨合，觀察到不夠時再加回最小限度的檢查。
+#     不要在沒有新拍板的情況下把閘門加回來。
+#   - 查詢失敗必須長得不像空清單。所有 glab 呼叫都檢查 exit code——
+#     token 過期的那天，`task mine` 要說「連不上」，不能說「沒有待辦」。
+#
+# 相依：glab（認證見專案記憶 gitlab-ssh-push-options）、jq。兩者都由 dev-env-ansible 管。
+# 健康檢查刻意不用 `glab auth status` —— 它對細粒度 token 必定誤報 Invalid token，
+# 見 `task doctor` 的註解。
+
+set -euo pipefail
+
+# 路徑前面**必須帶主機名**。只給 `<group>/<repo>` 的話 glab 會打 gitlab.com ——
+# 它只有在 repo 目錄內才靠 git remote 推斷主機，而這支腳本要能從任何目錄跑。
+# 少了主機名的症狀是 404／401，不是「找不到指令」。
+REPO="${TASK_REPO:-gitlab.dev.baasgames.com/hydrogen/roles/engineer/miskawu/docs/backlogs}"
+# `glab api` 不吃 -R，要用 --hostname，否則同樣落到 gitlab.com。
+HOST="${REPO%%/*}"
+FLOW_LABELS=(todo doing blocked done)
+# 這支腳本能貼的標籤。todo 不在裡面——拉 todo 是授權，是使用者的動作。
+AGENT_LABELS=(doing blocked done)
+
+die() { printf '錯誤：%s\n' "$1" >&2; exit 1; }
+
+_need_iid() { [[ "${1:-}" =~ ^[0-9]+$ ]] || die "要給 issue 編號，例：task $2 5"; }
+
+# 所有拿 JSON 的 glab 呼叫走這裡：exit code 非零或回的不是 JSON 都大聲失敗。
+# 在 `j=$(_glab_json ...)` 的呼叫形式下，這裡的 exit 1 會讓上層的賦值失敗，
+# set -e 接手中止整支腳本——失敗永遠不會被下游的 jq 洗成空清單。
+_glab_json() {
+  local out
+  if ! out=$(glab "$@" 2>&1); then
+    printf '錯誤：glab 失敗（這不是空清單，是查詢根本沒成功）。\n' >&2
+    printf '%s\n' "$out" >&2
+    printf '先跑 task doctor 檢查連線與 token；token 過期要去 GitLab 重發。\n' >&2
+    exit 1
+  fi
+  if ! jq -e . >/dev/null 2>&1 <<< "$out"; then
+    printf '錯誤：glab 回的不是 JSON：\n%s\n' "$out" >&2
+    exit 1
+  fi
+  printf '%s' "$out"
+}
+
+# 一次抓全部 open 的單，各指令用 jq 在本地切分——省 API 往返，也讓計數一致。
+_all_open() { _glab_json issue list -R "$REPO" --output json -P 100; }
+
+_by_label() { jq --arg l "$1" '[.[] | select(.labels | index($l))]'; }
+
+# 收集箱＝沒掛任何流程標籤的 open 單。
+_inbox() {
+  jq '[.[] | select([.labels[]? | select(. == "todo" or . == "doing"
+       or . == "blocked" or . == "done")] | length == 0)]'
+}
+
+# 列表統一格式：編號、標籤、標題。空清單印一行說明而不是靜默。
+#
+# 分隔字元用 0x1F **不能用 tab**：tab 是 IFS 的空白字元，bash 會把連續兩個合併成一個，
+# 於是沒有標籤的那些單，標題會靜默地跑到標籤欄去。同一個坑在 statusline.sh 踩過。
+_fmt() {
+  local n=0 out
+  out=$(jq -r '.[] | "\(.iid)\u001f\(.labels|join(","))\u001f\(.title)"')
+  while IFS=$'\x1f' read -r iid labels title; do
+    [ -z "$iid" ] && continue
+    printf '  #%-4s %-24s %s\n' "$iid" "${labels:--}" "$title"
+    n=$((n+1))
+  done <<< "$out"
+  [ "$n" -eq 0 ] && printf '  （沒有）\n'
+  return 0
+}
+
+# 代理寫的留言一律帶標記——同一個 GitLab 帳號分不出作者，標記是機械加的，
+# 不靠任何人記得。使用者自己的留言走網頁或裸 glab，不會有這個前綴。
+_note() {
+  local iid="$1"; shift
+  glab issue note "$iid" -R "$REPO" -m "🤖 [claude] $*"
+}
+
+# 貼上一個流程標籤，同時拿掉其餘。
+_set_state() {
+  local iid="$1" want="$2" unlabel=""
+  local ok=0
+  for s in "${AGENT_LABELS[@]}"; do [ "$s" = "$want" ] && ok=1; done
+  [ "$ok" -eq 1 ] || die "task 不貼 '$want' —— 那是使用者的動作，跑 task help 看指令。"
+  for s in "${FLOW_LABELS[@]}"; do
+    [ "$s" = "$want" ] || unlabel="${unlabel:+$unlabel,}$s"
+  done
+  glab issue update "$iid" -R "$REPO" --label "$want" --unlabel "$unlabel" >/dev/null
+  printf '#%s → %s\n' "$iid" "$want"
+}
+
+cmd_help() {
+  cat <<'HELP'
+task —— backlog 的指令列入口（v2）
+
+讀單
+  task mine              我的視角：doing（動手中）、todo（排隊），尾行給你的佇列張數
+  task ball              球在你手上：done 待驗收、blocked 等你回話
+  task inbox             收集箱：還沒決定要做的（無標籤）
+  task all               全部 open，含收集箱
+  task show <iid>        讀一張單，含所有留言
+  task next              取一件：doing 優先，其次 todo
+
+開單（誰都可以；落在收集箱，不貼標籤）
+  task new "<標題>" [說明]   建立前先以標題精確搜尋，命中就不重建。
+
+我的狀態轉移
+  task start <iid> "開工摘要"   todo／blocked → doing
+  task block <iid> "卡在哪"     doing → blocked（先寫留言，再貼標籤）
+  task done  <iid> "交件摘要"   doing → done（先寫留言，再貼標籤）
+  task note  <iid> "<文字>"     留言，不動狀態
+
+檢查
+  task doctor            API 真的通不通、身分、token 到期日、標籤齊不齊
+
+──────────────────────────────────────────────────────────
+這兩件是你的動作，這支腳本刻意沒有對應指令：
+
+  拉 todo（授權）  glab issue update <iid> --label todo
+  關單（驗收）     glab issue close <iid>
+
+blocked 的單在你回話之後由我用 task start 接續（你的回話就是放行）。
+指令的缺席就是「這個動作不歸代理」的文件。要改這條規則就改設計，不要繞過腳本。
+HELP
+}
+
+cmd_mine() {
+  local all; all=$(_all_open)
+  printf '\n動手中（doing）\n';                          _by_label doing <<< "$all" | _fmt
+  printf '\n排隊中（todo）—— 驗收不在單上要先落單\n';    _by_label todo  <<< "$all" | _fmt
+  local dn bn xn
+  dn=$(_by_label done    <<< "$all" | jq 'length')
+  bn=$(_by_label blocked <<< "$all" | jq 'length')
+  xn=$(_inbox            <<< "$all" | jq 'length')
+  printf '\n球在使用者：done %s 張待驗收、blocked %s 張等回話；收集箱 %s 張\n\n' "$dn" "$bn" "$xn"
+}
+
+cmd_ball() {
+  local all; all=$(_all_open)
+  printf '\n做完了，等你驗收（done）\n';  _by_label done    <<< "$all" | _fmt
+  printf '\n卡住等你回話（blocked）\n';   _by_label blocked <<< "$all" | _fmt
+  printf '\n'
+}
+
+cmd_inbox() {
+  local all; all=$(_all_open)
+  printf '\n收集箱（無標籤，還沒決定要做）\n'; _inbox <<< "$all" | _fmt
+  printf '\n'
+}
+
+cmd_next() {
+  local all j; all=$(_all_open)
+  for label in doing todo; do
+    j=$(_by_label "$label" <<< "$all")
+    if [ "$(jq 'length' <<< "$j")" -gt 0 ]; then
+      jq -r --arg l "$label" '.[0] | "取件：#\(.iid)  [\($l)]  \(.title)\n\(.web_url)"' <<< "$j"
+      [ "$label" = "todo" ] && printf '\n排隊中的單：task start 接手就開工。\n'
+      return 0
+    fi
+  done
+  printf '沒有可接的單。doing 與 todo 都是空的。\n'
+}
+
+cmd_new() {
+  local title="${1:-}" desc="${2:-}"
+  [ -n "$title" ] || die '要給標題，例：task new "修好 X"'
+  local hit
+  hit=$(_glab_json issue list -R "$REPO" --all --search "$title" --output json \
+        | jq -r --arg t "$title" '[.[] | select(.title == $t)] | .[0].web_url // empty')
+  if [ -n "$hit" ]; then
+    printf '已經有同名的單，不重建：\n%s\n' "$hit"
+    return 0
+  fi
+  glab issue create -R "$REPO" --title "$title" \
+    --description "${desc:-（待補：為什麼要做、現況與證據、落地位置（哪個 repo 哪裡）、驗收方向）}" --yes
+}
+
+# start —— v2 的核心轉移。一道機械檢查：只接受 todo（排隊中）或
+# blocked（使用者回話後接續，回話即放行）——收集箱的單必須經過使用者
+# 拉 todo 的授權。驗收閘門已於 2026-08-28 拍板移除（見檔頭），
+# 驗收的有無與品質交給模型判斷。
+cmd_start() {
+  local iid="$1" summary="$2"
+  [ -n "$summary" ] || die '要給開工摘要：task start <iid> "開工摘要"'
+  local vj labels
+  vj=$(_glab_json issue view "$iid" -R "$REPO" --output json)
+  labels=$(jq -r '[.labels[]?] | join(" ")' <<< "$vj")
+  case " $labels " in
+    *" doing "*)  die "#$iid 已經在 doing。" ;;
+    *" done "*)   die "#$iid 在等驗收，不重開。使用者驗完會關單或退回。" ;;
+    *" todo "*|*" blocked "*) : ;;
+    *) die "#$iid 還在收集箱。授權是使用者的動作：先由使用者拉 todo（glab issue update $iid --label todo）。" ;;
+  esac
+  _note "$iid" "上工：$summary" >/dev/null
+  _set_state "$iid" doing
+}
+
+cmd_doctor() {
+  local ok=1
+  # 刻意不用 `glab auth status`：它比對 token 的 scopes 陣列要有 api 與 write_repository，
+  # 而細粒度 token 的 scopes 字面上就是 ["granular"]，所以它必定印 Invalid token。
+  # 要驗就打真的 API。注意這裡只驗證了 backlogs 一個專案——
+  # 細粒度 token 的授權是逐專案發的，對這裡通不代表對別的專案通。
+  local probe
+  if probe=$(glab issue list -R "$REPO" -P 1 2>&1); then
+    printf 'API        可用\n'
+  else
+    printf 'API        失敗 —— glab 連不上或沒權限：\n%s\n' "$probe"; ok=0
+  fi
+
+  local who; who=$(glab api user --hostname "$HOST" 2>/dev/null | jq -r '.username // "?"')
+  printf '身分       %s\n' "$who"
+
+  local exp left
+  exp=$(glab api personal_access_tokens/self --hostname "$HOST" 2>/dev/null | jq -r '.expires_at // empty')
+  if [ -n "$exp" ]; then
+    left=$(( ( $(date -d "$exp" +%s) - $(date +%s) ) / 86400 ))
+    printf 'token      %s 到期，還有 %s 天' "$exp" "$left"
+    [ "$left" -lt 30 ] && printf '   ← 快到期了，該換發'
+    printf '\n'
+  else
+    printf 'token      查不到到期日（缺 Personal Access Token: Read 權限）\n'
+  fi
+
+  local have missing=""
+  have=$(glab label list -R "$REPO" 2>&1) || { printf '標籤       讀不到：%s\n' "$have"; have=""; ok=0; }
+  for l in "${FLOW_LABELS[@]}"; do
+    grep -q " $l ->" <<< "$have" || missing="${missing:+$missing }$l"
+  done
+  if [ -n "$missing" ]; then
+    printf '標籤       缺：%s   ← 標籤由使用者建，代理不建\n' "$missing"; ok=0
+  else
+    printf '標籤       四個都在（todo doing blocked done）\n'
+  fi
+
+  [ "$ok" -eq 1 ] || exit 1
+}
+
+main() {
+  local cmd="${1:-help}"; shift || true
+  case "$cmd" in
+    help|-h|--help) cmd_help ;;
+    mine)           cmd_mine ;;
+    ball)           cmd_ball ;;
+    inbox)          cmd_inbox ;;
+    next)           cmd_next ;;
+    all)            printf '\n全部 open（含收集箱）\n'; _all_open | _fmt; printf '\n' ;;
+    # 列表分支不能含 done：bash 的 case 只取第一個命中，含了就會把下面的
+    # `done <iid> "摘要"` 交件分支整個遮掉（#31 無頭取件實際踩到）。done 的清單看 task ball。
+    todo|doing|blocked)
+                    printf '\n%s\n' "$cmd"; _all_open | _by_label "$cmd" | _fmt; printf '\n' ;;
+    show)           _need_iid "${1:-}" show; glab issue view "$1" -R "$REPO" --comments ;;
+    new)            cmd_new "${1:-}" "${2:-}" ;;
+    start)          _need_iid "${1:-}" start; cmd_start "$1" "${2:-}" ;;
+    block)          _need_iid "${1:-}" block
+                    [ -n "${2:-}" ] || die '要寫清楚卡在哪：task block <iid> "問題"'
+                    _note "$1" "$2" >/dev/null
+                    _set_state "$1" blocked ;;
+    done)           _need_iid "${1:-}" done
+                    [ -n "${2:-}" ] || die '要給交件摘要：task done <iid> "摘要"'
+                    _note "$1" "$2" >/dev/null
+                    _set_state "$1" done ;;
+    note)           _need_iid "${1:-}" note
+                    [ -n "${2:-}" ] || die '要給留言內容'
+                    _note "$1" "$2" ;;
+    doctor)         cmd_doctor ;;
+    take|submit)    die "v2 已移除 '$cmd'：take 併入 start（含驗收閘門），submit 改名 done。跑 task help。" ;;
+    *)              die "沒有這個指令：$cmd（跑 task help）" ;;
+  esac
+}
+
+main "$@"
