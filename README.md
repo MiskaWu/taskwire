@@ -13,7 +13,7 @@
 | `bin/task-dispatch` | 無頭取件器。`flock` 防重入；`task next` 取件；照 `workspace::` 標籤對位——單 repo 開（或重用）worktree 站進去、多 repo 目錄站目錄、`mode::direct` 進場前機械檢查主 checkout 乾淨；起 `claude -p` 照協定做；退出後機械兜底——單子停在 doing 就補 block，永不留下「看起來有人在做、其實沒人在做」。開場先收門鈴信箱（在搶鎖之前）。 |
 | `bin/task-gc` | 對帳回收（dispatch 收尾與日報都會跑，手動 `task gc`）。worktree：「單子已關＋乾淨＋尖端已併入基準」三條件齊才刪（含放行 remote 的 `task/<N>` 遠端分支），不齊通知不刪。標籤：沒有 open 單掛著的 `base::` 屍體一併回收。查詢失敗大聲中止——查不到 ≠ 沒人用。 |
 | `bin/task-notify` | 系統級通知管道：Discord 推播（`~/.config/taskwire/discord-webhook`，選配）＋ GitLab「🤖 taskwire 系統健康」卡留痕掛 blocked。憑證失效、token 到期等異常都走這裡。 |
-| `bin/task-ui` | 本機控制台（127.0.0.1:9588）。設定、密鑰、服務與排程、log、通知測試，加上**唯讀**的單況。拉 todo 與關單刻意沒有按鈕——理由跟 `bin/task` 裡沒有那兩個指令是同一個。頁面在 `ui/index.html`。 |
+| `bin/task-ui` | 本機控制台（127.0.0.1:9588）。設定、密鑰、服務與排程、log、通知測試，加上**唯讀**的單況。拉 todo 與關單刻意沒有按鈕——理由跟 `bin/task` 裡沒有那兩個指令是同一個。前端是 React＋Vite（`ui/`，build 產物 `ui/dist` 由同一支 Python 伺服；log 用 SSE 即時跟隨），版型照 artifact「taskwire 控制台」設計稿。 |
 | `bin/taskwire-config.sh`<br>`bin/taskwire_config.py` | 設定的單一真相（`~/.config/taskwire/config.env`）。bash 與 python 兩份實作同義，優先序都是**環境變數 > config.env > 內建預設**。旋鈕的目錄在 `taskwire_config.py` 的 `SETTINGS`，控制台的表單由它長出來。 |
 | `bin/taskwire-install` | 檔案腳印的單一清單。`install`（冪等就位）、`status`（逐項對帳）、`uninstall`（照表拆光，設定與狀態預設保留）。 |
 | `systemd/` | user units：`task-webhook.service`、`task-ui.service`（兩個常駐）、`task-scan.timer`（每小時對帳，K8s 式 periodic resync，`Persistent=true`）、`task-digest.timer`（每日日報）。另有 `task-ui.container`（podman quadlet，與 `task-ui.service` 二選一）。 |
