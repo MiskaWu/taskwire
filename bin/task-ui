@@ -40,6 +40,11 @@ REPO_DIR = os.environ.get(
     os.path.dirname(os.path.dirname(os.path.realpath(__file__))),
 )
 UI_DIR = os.path.join(REPO_DIR, "ui")
+# 2026-08-28 改版：頁面是 React＋Vite，這裡伺服 build 產物。改前端後要 cd ui && npm run build。
+DIST_DIR = os.path.join(UI_DIR, "dist")
+MIME = {".html": "text/html; charset=utf-8", ".js": "application/javascript; charset=utf-8",
+        ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml", ".ico": "image/x-icon",
+        ".map": "application/json", ".woff2": "font/woff2", ".png": "image/png"}
 SYSTEMD_USER_DIR = os.path.expanduser("~/.config/systemd/user")
 CSRF_HEADER = "X-Taskwire-UI"
 
@@ -358,6 +363,61 @@ def journal(unit: str, lines: int) -> dict:
     return {"ok": True, "text": out}
 
 
+def creds_state() -> dict:
+    """無頭憑證健康。與 doctor／dispatch 預檢同判準：檔案不存在或落後 48h 未刷新才算異常，
+    accessToken 短期過期是常態（refresh 會救），不拿它誤報。"""
+    path = os.path.expanduser("~/.claude/.credentials.json")
+    if not os.path.isfile(path):
+        return {"ok": False, "label": "找不到憑證檔", "hint": "終端機跑 claude /login"}
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, json.JSONDecodeError):
+        return {"ok": False, "label": "讀不出憑證檔", "hint": "格式可能改了，跑 task doctor 看細節"}
+    exp_ms = None
+    def walk(node):
+        nonlocal exp_ms
+        if isinstance(node, dict):
+            for k, v in node.items():
+                if k == "expiresAt" and exp_ms is None:
+                    exp_ms = v
+                walk(v)
+        elif isinstance(node, list):
+            for v in node:
+                walk(v)
+    walk(data)
+    if exp_ms is None:
+        return {"ok": True, "label": "檔案在", "hint": "讀不出到期欄位，靠事後判定"}
+    age = time.time() - exp_ms / 1000
+    if age > 172800:
+        return {"ok": False, "label": f"{int(age // 86400)} 天沒刷新",
+                "hint": "可能失效——終端機跑 claude /login"}
+    return {"ok": True, "label": "正常", "hint": "refresh 活著（48 小時內有成功刷新）"}
+
+
+_token_cache = {"at": 0.0, "payload": None}
+
+
+def token_info() -> dict:
+    """glab token 到期資訊，快取 6 小時——它一天不會變兩次，別每次刷新頁面都打 API。"""
+    now = time.time()
+    if _token_cache["payload"] and now - _token_cache["at"] < 21600:
+        return _token_cache["payload"]
+    host = cfg.effective()["TASK_REPO"].split("/")[0]
+    rc, out = run(["glab", "api", "personal_access_tokens/self", "--hostname", host], timeout=20)
+    if rc != 0:
+        payload = {"ok": False, "error": "查不到 token 資訊（可能缺 Personal Access Token: Read 權限）"}
+    else:
+        try:
+            exp = json.loads(out).get("expires_at") or ""
+            days = int((time.mktime(time.strptime(exp, "%Y-%m-%d")) - now) / 86400) if exp else None
+            payload = {"ok": True, "expires_at": exp, "days": days}
+        except (json.JSONDecodeError, ValueError):
+            payload = {"ok": False, "error": "token 回應解析失敗"}
+    _token_cache.update(at=now, payload=payload)
+    return payload
+
+
 def base_state() -> dict:
     on_disk = cfg.read_file()
     eff = cfg.effective()
@@ -405,6 +465,7 @@ def base_state() -> dict:
         "state_dir": cfg.STATE_DIR,
         "repo_dir": REPO_DIR,
         "webhook_url_hint": f":{cfg.effective()['TASK_WEBHOOK_PORT']}/hook",
+        "creds": creds_state(),
     }
 
 
@@ -456,7 +517,7 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         path, query = parsed.path, parse_qs(parsed.query)
         if path in ("/", "/index.html"):
-            self._serve_page()
+            self._serve_static(path)
         elif path == "/api/state":
             self._json(base_state())
         elif path == "/api/issues":
@@ -472,6 +533,10 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"ok": rc == 0 and out.strip() == "ok",
                         "text": out or "（沒有回應）",
                         "error": "" if rc == 0 else f"門鈴 :{port} 沒有回應"})
+        elif path == "/api/tokeninfo":
+            self._json(token_info())
+        elif path == "/api/log/stream":
+            self._log_stream(query)
         elif path == "/api/log":
             self._json(read_log(query.get("name", ["dispatch.log"])[0],
                                 int(query.get("lines", ["300"])[0])))
@@ -488,7 +553,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self._json({"ok": True, "name": name, "value": cfg.read_secret(name)})
         else:
-            self._send(404, b"not found\n", "text/plain; charset=utf-8")
+            self._serve_static(path)
 
     def do_POST(self):  # noqa: N802
         if not self._host_ok():
@@ -640,16 +705,72 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self._json({"ok": False, "error": f"沒有這個端點：{path}"}, 404)
 
-    def _serve_page(self):
-        path = os.path.join(UI_DIR, "index.html")
-        try:
-            with open(path, "rb") as fh:
-                body = fh.read()
-        except OSError as exc:
-            self._send(500, f"讀不到頁面 {path}：{exc}\n".encode(),
+    def _serve_static(self, path):
+        """伺服 ui/dist 的 build 產物。路徑正規化後必須留在 DIST 內——路徑穿越直接 404。
+        非資產路徑一律回 index.html（SPA 後援；hash routing 其實用不到，保險）。"""
+        if not os.path.isdir(DIST_DIR):
+            self._send(500, "ui/dist 不存在——到 ui/ 跑 npm install && npm run build。\n".encode(),
                        "text/plain; charset=utf-8")
             return
-        self._send(200, body, "text/html; charset=utf-8")
+        rel = "index.html" if path in ("/", "/index.html") else path.lstrip("/")
+        full = os.path.normpath(os.path.join(DIST_DIR, rel))
+        if not full.startswith(DIST_DIR):
+            self._send(404, b"not found\n", "text/plain; charset=utf-8")
+            return
+        if not os.path.isfile(full):
+            if "." in os.path.basename(rel):
+                self._send(404, b"not found\n", "text/plain; charset=utf-8")
+                return
+            full = os.path.join(DIST_DIR, "index.html")
+        try:
+            with open(full, "rb") as fh:
+                body = fh.read()
+        except OSError as exc:
+            self._send(500, f"讀不到 {full}：{exc}\n".encode(), "text/plain; charset=utf-8")
+            return
+        ctype = MIME.get(os.path.splitext(full)[1], "application/octet-stream")
+        self._send(200, body, ctype)
+
+    def _log_stream(self, query):
+        """SSE 跟隨 log：從檔尾開始，長出來的行即時推給頁面。
+        每秒探一次、15 秒一個心跳註解防中間層斷線；檔案被截斷（輪替）就回頭從 0 讀。
+        EventSource 帶不了自訂標頭，所以這個 GET 端點只驗 Host——它是唯讀的，設計上允許。"""
+        name = query.get("name", ["dispatch.log"])[0]
+        if not LOG_FILE_RE.match(name):
+            self._json({"ok": False, "error": f"不是可讀的 log 檔名：{name}"}, 400)
+            return
+        path = os.path.join(cfg.STATE_DIR, name)
+        if not os.path.isfile(path):
+            self._json({"ok": False, "error": f"{name} 不存在"}, 404)
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as fh:
+                fh.seek(0, os.SEEK_END)
+                idle = 0
+                while idle < 3600:   # 一小時沒動靜就收線，頁面會自動重連
+                    line = fh.readline()
+                    if line:
+                        idle = 0
+                        payload = json.dumps(line.rstrip("\n"), ensure_ascii=False)
+                        self.wfile.write(f"data: {payload}\n\n".encode("utf-8"))
+                        self.wfile.flush()
+                        continue
+                    time.sleep(1)
+                    idle += 1
+                    if idle % 15 == 0:
+                        self.wfile.write(b": ping\n\n")
+                        self.wfile.flush()
+                    try:
+                        if os.path.getsize(path) < fh.tell():
+                            fh.seek(0)
+                    except OSError:
+                        break
+        except (BrokenPipeError, ConnectionResetError):
+            pass
 
 
 def main() -> int:

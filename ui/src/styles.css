@@ -1,0 +1,136 @@
+/* taskwire 控制台——設計稿 2026-08-28 拍板的色票與元件 */
+:root{
+  --bg:#f3f5f8; --panel:#fff; --ink:#12151a; --ink2:#5a6472;
+  --line:#e2e6ec; --line2:#eef1f5; --acc:#3b5bdb; --acc-bg:#eaeeff;
+  --ok:#0f7b41; --ok-bg:#e8f5ee; --bad:#b3261e; --bad-bg:#fdecea;
+  --warn:#8a5a00; --warn-bg:#fdf3e0; --idle:#5a6472; --idle-bg:#eef1f5;
+  --side:#161b26; --side-line:#232b3b; --side-txt:#9aa3b2; --side-dim:#6b7484;
+  --mono:'JetBrains Mono',ui-monospace,SFMono-Regular,Menlo,monospace;
+  --sans:-apple-system,BlinkMacSystemFont,'PingFang TC',Inter,'Noto Sans TC',sans-serif;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+  font-size:13.5px;line-height:1.55;-webkit-font-smoothing:antialiased}
+#root,.shell{height:100vh}
+.shell{display:flex;overflow:hidden}
+a{color:var(--acc);text-decoration:none} a:hover{color:#2f49b0}
+
+/* 側欄 */
+.side{width:224px;flex:0 0 auto;background:var(--side);display:flex;
+  flex-direction:column;padding:18px 14px}
+.brand{display:flex;align-items:center;gap:9px;padding:2px 12px 16px}
+.brand .name{font-family:var(--mono);font-size:15px;font-weight:600;color:#fff;letter-spacing:-.01em}
+.brand .sub{font-size:11px;color:var(--side-dim)}
+.nav{display:flex;flex-direction:column;gap:3px}
+.nav-item{display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:8px;
+  font-size:13px;font-weight:500;color:var(--side-txt);cursor:pointer;border:none;background:none;
+  font-family:var(--sans);text-align:left;width:100%}
+.nav-item svg{color:var(--side-dim)}
+.nav-item:hover{background:#1d2432;color:#d5dae2}
+.nav-item.on{background:#262e40;color:#fff;font-weight:600}
+.nav-item.on svg{color:#8aa2ff}
+.side-foot{margin-top:auto;display:flex;flex-direction:column;gap:8px;
+  padding:12px 12px 0;border-top:1px solid var(--side-line)}
+.side-foot .row{display:flex;align-items:center;gap:7px;font-size:12px;color:var(--side-txt)}
+.side-foot .repo{font-family:var(--mono);font-size:10.5px;color:#5b6472;word-break:break-all}
+
+/* 主區 */
+.main{flex:1 1 auto;display:flex;flex-direction:column;min-width:0}
+.topbar{flex:0 0 auto;display:flex;align-items:center;gap:14px;
+  padding:14px 24px;background:var(--panel);border-bottom:1px solid var(--line)}
+.topbar h1{font-size:17px;font-weight:800;letter-spacing:-.02em;margin:0}
+.topbar .sub{font-size:12px;color:var(--ink2)}
+.topbar .acts{margin-left:auto;display:flex;align-items:center;gap:8px}
+.content{flex:1 1 auto;overflow:auto;padding:18px 24px 24px;
+  display:flex;flex-direction:column;gap:14px}
+
+/* 元件 */
+.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px 18px}
+.card-head{display:flex;align-items:flex-start;gap:8px;margin-bottom:12px}
+.card-head .t{font-size:13.5px;font-weight:700}
+.card-head .s{font-size:12px;color:var(--ink2)}
+.card-head .right{margin-left:auto;display:flex;gap:8px;align-items:center}
+.btn{background:var(--panel);border:1px solid #d5dae2;color:#3f4754;
+  font-family:var(--sans);font-size:12.5px;font-weight:600;padding:7px 13px;
+  border-radius:8px;cursor:pointer}
+.btn:hover{border-color:var(--acc);color:var(--acc)}
+.btn.primary{background:var(--acc);border-color:var(--acc);color:#fff}
+.btn.primary:hover{opacity:.92;color:#fff}
+.btn.danger{color:var(--bad)} .btn.danger:hover{border-color:var(--bad)}
+.btn:disabled{opacity:.45;cursor:not-allowed}
+.badge{font-family:var(--mono);font-size:11px;font-weight:600;padding:2px 8px;
+  border-radius:999px;white-space:nowrap}
+.b-ok{color:var(--ok);background:var(--ok-bg)} .b-bad{color:var(--bad);background:var(--bad-bg)}
+.b-warn{color:var(--warn);background:var(--warn-bg)} .b-idle{color:var(--idle);background:var(--idle-bg)}
+.b-accent{color:var(--acc);background:var(--acc-bg)}
+.dot{display:inline-block;width:8px;height:8px;border-radius:999px;flex:0 0 auto}
+input,textarea,select{font-family:var(--mono);font-size:12.5px;padding:8px 11px;
+  border:1px solid #d5dae2;border-radius:8px;background:#fafbfc;color:var(--ink);width:100%}
+input:focus,textarea:focus{outline:2px solid var(--acc);outline-offset:-1px}
+textarea{min-height:130px;line-height:1.6;resize:vertical;font-size:12px}
+.grid{display:grid;gap:14px}
+.g4{grid-template-columns:repeat(4,minmax(0,1fr))}
+.g2{grid-template-columns:2fr 1fr}
+.g2e{grid-template-columns:1fr 1fr}
+.gset{grid-template-columns:1.15fr 1fr;align-items:start}
+
+.tile{background:var(--panel);border:1px solid var(--line);border-radius:10px;
+  padding:14px 16px;display:flex;flex-direction:column;gap:6px}
+.tile .lab{display:flex;justify-content:space-between;align-items:center;gap:8px;
+  font-size:11.5px;font-weight:600;letter-spacing:.05em;color:var(--ink2)}
+.tile .val{font-size:21px;font-weight:700;letter-spacing:-.01em}
+.tile .val.mono{font-family:var(--mono)}
+.tile .sub{font-size:12px;color:var(--ink2)}
+
+.err{background:var(--bad-bg);border:1px solid var(--bad);color:var(--bad);
+  border-radius:8px;padding:11px 13px;font-size:12.5px}
+.err pre{background:transparent;border:none;color:inherit;padding:6px 0 0;margin:0;
+  white-space:pre-wrap;word-break:break-word;font-family:var(--mono);font-size:11.5px}
+.okmsg{background:var(--ok-bg);border:1px solid var(--ok);color:var(--ok);
+  border-radius:8px;padding:9px 12px;font-size:12.5px}
+.note{background:var(--warn-bg);border:1px solid #f0e0bb;color:var(--warn);
+  border-radius:8px;padding:9px 12px;font-size:11.5px}
+.muted{font-size:12px;color:var(--ink2)}
+.mono{font-family:var(--mono)}
+pre.pane{background:var(--line2);border:1px solid var(--line);border-radius:8px;
+  padding:12px 14px;margin:0;font-family:var(--mono);font-size:11.5px;line-height:1.6;
+  white-space:pre-wrap;word-break:break-word;max-height:380px;overflow:auto}
+
+.logwrap{display:grid;grid-template-columns:250px 1fr;gap:14px;flex:1 1 auto;min-height:0}
+.loglist{background:var(--panel);border:1px solid var(--line);border-radius:10px;
+  padding:10px;display:flex;flex-direction:column;gap:3px;overflow:auto}
+.logfile{display:flex;flex-direction:column;gap:1px;padding:9px 12px;border-radius:8px;
+  cursor:pointer;border:none;background:none;text-align:left;font-family:var(--sans)}
+.logfile:hover{background:var(--line2)}
+.logfile.on{background:var(--acc-bg)}
+.logfile .n{font-family:var(--mono);font-size:11.5px;font-weight:600;color:#3f4754}
+.logfile.on .n{color:var(--acc)}
+.logfile .t{font-size:11px;color:#8892a0}
+.logpane{flex:1 1 auto;background:#10141c;border-radius:10px;padding:14px 16px;
+  font-family:var(--mono);font-size:12px;line-height:1.7;color:#c7d0dd;overflow:auto;
+  white-space:pre-wrap;word-break:break-word}
+.logcol{display:flex;flex-direction:column;gap:8px;min-width:0;min-height:0}
+
+.trow{display:grid;grid-template-columns:64px 1fr 72px;gap:10px;align-items:center;
+  padding:8px 0;border-bottom:1px solid var(--line2)}
+.trow .days{font-family:var(--mono);font-size:11.5px;color:var(--ink2);text-align:right}
+.ghead{display:flex;align-items:center;gap:8px;margin:14px 0 6px;font-size:13px;font-weight:700}
+.empty{font-size:12.5px;color:#8892a0;padding:4px 0 2px}
+.srow{display:grid;grid-template-columns:1.4fr 1fr 1.3fr;gap:12px;align-items:center;
+  padding:12px 0;border-bottom:1px solid var(--line2)}
+.srow .nm{font-weight:600}
+.srow .un{font-family:var(--mono);font-size:11px;color:var(--ink2)}
+.srow .acts{display:flex;gap:6px;justify-content:flex-end;flex-wrap:wrap}
+.frow{display:flex;flex-direction:column;gap:5px;padding:12px 0;border-bottom:1px solid var(--line2)}
+.frow .head{display:flex;align-items:center;gap:8px}
+.frow .head .k{font-family:var(--mono);font-size:11px;color:#8892a0}
+.frow .help{font-size:11.5px;color:var(--ink2)}
+.spin{display:inline-block;width:11px;height:11px;border:2px solid var(--line);
+  border-top-color:var(--acc);border-radius:50%;animation:sp .7s linear infinite;vertical-align:-1px}
+@keyframes sp{to{transform:rotate(360deg)}}
+.stat{display:flex;align-items:baseline;gap:6px;padding:8px 14px;background:#f6f7fa;border-radius:8px}
+.stat .n{font-family:var(--mono);font-size:18px;font-weight:600}
+.stat.hi{background:var(--acc-bg)} .stat.hi .n,.stat.hi span{color:var(--acc)}
+.actline{display:flex;gap:12px;padding:7px 0;border-bottom:1px solid var(--line2);
+  font-family:var(--mono);font-size:12px}
+.actline .t{color:var(--ink2);flex:0 0 auto}
