@@ -1,4 +1,4 @@
-__pycache__/
-*.pyc
 ui/node_modules/
-ui/dist/
+internal/webui/dist/
+/bin/task-ui
+/bin/task-webhookd

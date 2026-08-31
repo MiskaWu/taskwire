@@ -1,9 +1,10 @@
 import { useEffect, useState } from 'react';
-import { api } from '../api.js';
-import { Badge, Btn, Card, ErrBox, Spin, days } from '../ui.jsx';
-import { Topbar } from '../App.jsx';
+import { api } from '../api';
+import { Badge, Btn, Card, ErrBox, Spin, days } from '../ui';
+import { Topbar } from '../App';
+import type { IssuesResp } from '../types';
 
-const GROUPS = [
+const GROUPS: Array<[string, string, string]> = [
   ['doing', '動手中 doing', 'accent'],
   ['blocked', '卡住等回話 blocked', 'bad'],
   ['done', '做完待驗收 done', 'ok'],
@@ -12,10 +13,10 @@ const GROUPS = [
 ];
 
 export default function Tickets() {
-  const [r, setR] = useState(null);
-  const load = async (force) => {
+  const [r, setR] = useState<IssuesResp | null>(null);
+  const load = async (force: boolean) => {
     setR(null);
-    setR(await api('/api/issues' + (force ? '?force=1' : '')));
+    setR(await api<never>('/api/issues' + (force ? '?force=1' : '')) as IssuesResp);
   };
   useEffect(() => { load(false); }, []);
 

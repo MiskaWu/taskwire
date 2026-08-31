@@ -1,36 +1,39 @@
 import { useState } from 'react';
-import { api } from '../api.js';
-import { Badge, Btn, Card, ErrBox, Spin } from '../ui.jsx';
-import { Topbar } from '../App.jsx';
+import { api } from '../api';
+import { Badge, Btn, Card, ErrBox, Spin } from '../ui';
+import { Topbar } from '../App';
+import type { ActionResult, PageProps, TextResp, UnitInfo } from '../types';
 
-function Unit({ u, reload }) {
-  const [msg, setMsg] = useState(null);
-  const [journal, setJournal] = useState(null);
+type JournalState = TextResp | { loading: true } | null;
+
+function Unit({ u, reload }: { u: UnitInfo; reload: () => void }) {
+  const [msg, setMsg] = useState<ActionResult | null>(null);
+  const [journal, setJournal] = useState<JournalState>(null);
   const [sched, setSched] = useState(u.oncalendar || '');
   const [busy, setBusy] = useState(false);
 
-  const act = async (action) => {
+  const act = async (action: string) => {
     setBusy(true); setMsg(null);
-    const r = await api('/api/service', { unit: u.name, action });
+    const r = await api<object>('/api/service', { unit: u.name, action });
     setBusy(false);
     setMsg(r.ok ? { ok: true, text: `${action} 完成` } : r);
     if (r.ok) setTimeout(reload, 700);
   };
   const applySched = async () => {
     setBusy(true); setMsg(null);
-    const r = await api('/api/schedule', { unit: u.name, oncalendar: sched });
+    const r = await api<{ parsed?: string }>('/api/schedule', { unit: u.name, oncalendar: sched });
     setBusy(false);
-    setMsg(r.ok ? { ok: true, text: `已套用${r.parsed ? '：' + r.parsed.split('\n').find((l) => l.includes('Next')) : ''}` } : r);
+    setMsg(r.ok ? { ok: true, text: `已套用${r.parsed ? '：' + (r.parsed.split('\n').find((l) => l.includes('Next')) || '') : ''}` } : r);
     if (r.ok) setTimeout(reload, 700);
   };
   const resetSched = async () => {
-    const r = await api('/api/schedule/reset', { unit: u.name });
+    const r = await api<object>('/api/schedule/reset', { unit: u.name });
     setMsg(r.ok ? { ok: true, text: '已還原成 repo 出廠排程' } : r);
     if (r.ok) setTimeout(reload, 700);
   };
   const showJournal = async () => {
     setJournal({ loading: true });
-    setJournal(await api(`/api/journal?unit=${encodeURIComponent(u.name)}&lines=60`));
+    setJournal(await api<{ text: string }>(`/api/journal?unit=${encodeURIComponent(u.name)}&lines=60`));
   };
 
   const stateBadge = u.active === 'unknown' ? <Badge k="warn">狀態不明</Badge>
@@ -71,14 +74,15 @@ function Unit({ u, reload }) {
       </div>
     )}
     {msg && (msg.ok ? <div className="okmsg" style={{ margin: '8px 0' }}>{msg.text}</div> : <ErrBox r={msg} />)}
-    {journal && (journal.loading ? <Spin /> : journal.ok
+    {journal && ('loading' in journal ? <Spin /> : journal.ok
       ? <pre className="pane" style={{ margin: '8px 0' }}>{journal.text}</pre>
       : <ErrBox r={journal} />)}
   </>);
 }
 
-export default function Services({ st, reload }) {
+export default function Services({ st, reload }: PageProps) {
   if (!st) return <><Topbar title="服務與排程" sub="載入中…" /><div className="content"><Spin /></div></>;
+  if (!st.ok) return <><Topbar title="服務與排程" sub="狀態讀取失敗" /><div className="content"><ErrBox r={st} /></div></>;
   const services = st.units.filter((u) => u.kind !== 'timer');
   const timers = st.units.filter((u) => u.kind === 'timer');
   return (<>

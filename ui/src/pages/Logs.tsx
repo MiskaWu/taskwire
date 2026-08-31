@@ -1,25 +1,27 @@
 import { useEffect, useRef, useState } from 'react';
-import { api, streamLog } from '../api.js';
-import { Badge, Btn, ErrBox, Spin } from '../ui.jsx';
-import { Topbar } from '../App.jsx';
+import { api, streamLog } from '../api';
+import { Badge, Btn, ErrBox, Spin } from '../ui';
+import { Topbar } from '../App';
+import type { LogResp, PageProps } from '../types';
 
-export default function Logs({ st }) {
+export default function Logs({ st }: PageProps) {
   const [name, setName] = useState('dispatch.log');
-  const [r, setR] = useState(null);
-  const [lines, setLines] = useState([]);
+  const [r, setR] = useState<LogResp | null>(null);
+  const [lines, setLines] = useState<string[]>([]);
   const [follow, setFollow] = useState(true);
   const [live, setLive] = useState(false);
-  const esRef = useRef(null);
-  const paneRef = useRef(null);
+  const esRef = useRef<EventSource | null>(null);
+  const paneRef = useRef<HTMLDivElement | null>(null);
 
   // 換檔或切換跟隨：先抓 400 行存量，跟隨開著就再開 SSE 接增量。
   useEffect(() => {
     let dead = false;
     setR(null); setLines([]); setLive(false);
-    api(`/api/log?name=${encodeURIComponent(name)}&lines=400`).then((res) => {
+    api<never>(`/api/log?name=${encodeURIComponent(name)}&lines=400`).then((res) => {
       if (dead) return;
-      setR(res);
-      if (res.ok) setLines(res.text ? res.text.replace(/\n$/, '').split('\n') : []);
+      const lr = res as LogResp;
+      setR(lr);
+      if (lr.ok) setLines(lr.text ? lr.text.replace(/\n$/, '').split('\n') : []);
     });
     if (follow) {
       const es = streamLog(name, (ln) => {
@@ -37,7 +39,7 @@ export default function Logs({ st }) {
   }, [lines, follow]);
 
   const files = ['dispatch.log', ...(st?.ok ? st.run_logs.filter((n) => n !== 'dispatch.log') : [])];
-  const tag = (n) => n === 'dispatch.log' ? '總帳' : ('#' + (n.match(/-([0-9]+)\.log$/)?.[1] || '?'));
+  const tag = (n: string) => n === 'dispatch.log' ? '總帳' : ('#' + (n.match(/-([0-9]+)\.log$/)?.[1] || '?'));
 
   return (<>
     <Topbar title="紀錄" sub="無頭側發生的每件事——dispatch 總帳與每次取件的個別紀錄">

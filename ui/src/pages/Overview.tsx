@@ -1,36 +1,37 @@
 import { useEffect, useState } from 'react';
-import { api } from '../api.js';
-import { Badge, Btn, Card, ErrBox, Tile, Spin } from '../ui.jsx';
-import { Topbar } from '../App.jsx';
+import { api } from '../api';
+import { Badge, Btn, Card, ErrBox, Tile, Spin } from '../ui';
+import { Topbar } from '../App';
+import type { ActionResult, IssuesResp, LogResp, PageProps, TokenResp } from '../types';
 
-export default function Overview({ st, reload }) {
-  const [issues, setIssues] = useState(null);
-  const [token, setToken] = useState(null);
-  const [tail, setTail] = useState(null);
-  const [doctor, setDoctor] = useState(null);
+export default function Overview({ st }: PageProps) {
+  const [issues, setIssues] = useState<IssuesResp | null>(null);
+  const [token, setToken] = useState<TokenResp | null>(null);
+  const [tail, setTail] = useState<LogResp | null>(null);
+  const [doctor, setDoctor] = useState<ActionResult | null>(null);
   const [busy, setBusy] = useState('');
-  const [flash, setFlash] = useState(null);
+  const [flash, setFlash] = useState<{ key: string; r: ActionResult } | null>(null);
 
   useEffect(() => {
-    api('/api/issues').then(setIssues);
-    api('/api/tokeninfo').then(setToken);
-    api('/api/log?name=dispatch.log&lines=14').then(setTail);
+    api<never>('/api/issues').then((r) => setIssues(r as IssuesResp));
+    api<never>('/api/tokeninfo').then((r) => setToken(r as TokenResp));
+    api<never>('/api/log?name=dispatch.log&lines=14').then((r) => setTail(r as LogResp));
   }, []);
 
-  const run = async (key, path, body) => {
+  const run = async (key: string, path: string, body?: unknown) => {
     setBusy(key);
-    const r = await (body !== undefined ? api(path, body) : api(path));
+    const r = await api<ActionResult & object>(path, body);
     setBusy('');
     if (key === 'doctor') setDoctor(r);
     else setFlash({ key, r });
-    if (key === 'wake') setTimeout(() => api('/api/log?name=dispatch.log&lines=14').then(setTail), 1800);
+    if (key === 'wake') setTimeout(() => api<never>('/api/log?name=dispatch.log&lines=14').then((res) => setTail(res as LogResp)), 1800);
   };
 
-  const webhook = st?.ok && st.units.find((u) => u.name === 'task-webhook.service');
+  const webhook = st?.ok ? st.units.find((u) => u.name === 'task-webhook.service') : undefined;
   const timers = st?.ok ? st.units.filter((u) => u.kind === 'timer') : [];
   const creds = st?.ok ? st.creds : null;
   const b = issues?.ok ? issues.buckets : null;
-  const activeN = st?.ok ? st.units.filter((u) => u.active === 'active').length : '…';
+  const activeN = st?.ok ? st.units.filter((u) => u.active === 'active').length : null;
 
   return (<>
     <Topbar title="總覽" sub={`系統健康、球權與最近活動${issues?.ok ? ` — ${issues.fetched_at} 快照` : ''}`}>
@@ -60,18 +61,18 @@ export default function Overview({ st, reload }) {
           value={creds ? creds.label : '…'} sub={creds?.hint || '48 小時內有成功刷新即為正常'} />
         <Tile label="GLAB TOKEN" mono
           badge={token && (token.ok
-            ? <Badge k={token.days < 30 ? 'warn' : 'ok'}>{token.expires_at}</Badge>
+            ? <Badge k={(token.days ?? 999) < 30 ? 'warn' : 'ok'}>{token.expires_at}</Badge>
             : <Badge k="bad">查不到</Badge>)}
           value={token ? (token.ok ? `${token.days} 天` : '—') : '…'}
-          sub={token?.ok ? '到期前 30 天日報會示警（#32）' : token?.error || ''} />
-        <Tile label="服務" mono value={st?.ok ? `${activeN} / ${st.units.length}` : '…'}
+          sub={token?.ok ? '到期前 30 天日報會示警（#32）' : (token && !token.ok && token.error) || ''} />
+        <Tile label="服務" mono value={st?.ok && activeN !== null ? `${activeN} / ${st.units.length}` : '…'}
           badge={st?.ok && <Badge k={activeN === st.units.length ? 'ok' : 'warn'}>
             {activeN === st.units.length ? '全部 active' : '有服務停著'}</Badge>}
           sub="webhook · 信箱監看 · 控制台 · 兩個 timer" />
       </div>
       <div className="grid g2">
         <Card title="球在誰手上" sub="拉 todo 與關單是你的動作——這裡只報數，不代勞">
-          {issues === null ? <Spin /> : !issues.ok ? <ErrBox r={issues} /> : (<>
+          {issues === null ? <Spin /> : !issues.ok || !b ? <ErrBox r={issues} /> : (<>
             <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 12 }}>
               {b.done.length + b.blocked.length === 0 ? '乾淨——沒有在等你的。' : '有球在你手上：'}
             </div>
