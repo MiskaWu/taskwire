@@ -12,7 +12,7 @@
    不是加規則。記憶 `no-mechanical-gates-on-judgment` 同義。
 2. **傷害邊界維持機械**：拉 todo（授權）與關單（驗收）是使用者的動作，`bin/task`
    刻意沒有這些指令——**指令的缺席本身就是權限文件**，不要「補全」它們，
-   也不要繞過腳本直接下 glab 動這兩件事。worktree 不推 origin；token 輪替不由代理觸發。
+   也不要繞過腳本直接下 glab 動這兩件事。worktree 不推 origin（**2026-08-28 使用者暫時放寬**：無頭線 settings 的 push deny 已移除，推送交給 git-push-guard——主 checkout 可推、worktree 要 /allow-push 放行；收回＝把 `Bash(git push:*)` 加回 headless/settings.json 的 deny）；token 輪替不由代理觸發。
 3. **查詢失敗必須長得不像空清單**。所有拿 JSON 的 glab 呼叫走 `_glab_json`，
    別繞過它——token 過期那天 `task mine` 要說「連不上」，不能說「沒有待辦」。
 4. **webhook 是門鈴，不是資料來源**。payload 不進決策；dispatch 是 level-triggered，

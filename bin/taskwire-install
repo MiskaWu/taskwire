@@ -28,6 +28,11 @@ FALLBACK_UNITS=(task-webhook.service)                 # 沒 podman 才用的直�
 ENABLE_UNITS=(task-ui.service task-doorbell.path task-scan.timer task-digest.timer)
 START_ONLY=(task-webhook.service)   # quadlet 生成的 unit 不吃 enable，只 start
 DATA_DIRS=("$HOME/.config/taskwire" "$HOME/.local/state/taskwire")
+# 無頭線的 Claude 設定目錄（P0）：settings 與 CLAUDE.md symlink 回 repo/headless/，
+# 憑證 symlink 到互動側那份（同一身分、同一 refresh；千萬不要改成複製）。
+# 目錄本身是資料（無頭的記憶與對話累積在裡面），uninstall 只拆連結不刪目錄。
+HEADLESS_DIR="$HOME/.config/taskwire/headless-claude"
+CREDS_SRC="$HOME/.claude/.credentials.json"
 IMAGE=localhost/taskwire-webhook:latest
 
 DRY=0
@@ -43,6 +48,12 @@ cmd_install() {
   echo "▸ skill symlink → $SKILL_LINK"
   run mkdir -p "$(dirname "$SKILL_LINK")"
   run ln -sfn "$REPO_DIR/skill" "$SKILL_LINK"
+  echo "▸ 無頭線設定目錄 → $HEADLESS_DIR"
+  run mkdir -p "$HEADLESS_DIR"
+  run ln -sfn "$REPO_DIR/headless/settings.json" "$HEADLESS_DIR/settings.json"
+  run ln -sfn "$REPO_DIR/headless/CLAUDE.md" "$HEADLESS_DIR/CLAUDE.md"
+  if [ -f "$CREDS_SRC" ]; then run ln -sfn "$CREDS_SRC" "$HEADLESS_DIR/.credentials.json"
+  else echo "  ⚠ $CREDS_SRC 不存在（claude /login 之後重跑 install 補上憑證連結）"; fi
   echo "▸ systemd unit 複本 → $SYSD（drop-in 不會被動到）"
   run mkdir -p "$SYSD"
   local changed=0
@@ -105,6 +116,14 @@ cmd_status() {
     _row 有 "$d" "$(ls "$d" | tr '\n' ' ')"
   done
   [ "$found" -eq 0 ] && _row 無 "（全部照出廠排程）" ""
+  echo "▸ 無頭線設定目錄"
+  for pair in "settings.json:$REPO_DIR/headless/settings.json" \
+              "CLAUDE.md:$REPO_DIR/headless/CLAUDE.md" \
+              ".credentials.json:$CREDS_SRC"; do
+    local nm="${pair%%:*}" want="${pair#*:}"
+    if [ "$(readlink "$HEADLESS_DIR/$nm" 2>/dev/null)" = "$want" ]; then _row ok "headless/$nm" "→ 正確目標"
+    else _row '⚠' "headless/$nm" "缺或指錯（跑 install）"; bad=1; fi
+  done
   echo "▸ 門鈴部署"
   if have_podman; then
     [ -f "$QUAD/task-webhook.container" ] && _row ok "quadlet" "$QUAD/task-webhook.container" \
@@ -143,6 +162,9 @@ cmd_uninstall() {
     [ "$(readlink "$BIN_DIR/$name" 2>/dev/null)" = "$REPO_DIR/bin/$name" ] && run rm -f "$BIN_DIR/$name"
   done
   [ "$(readlink "$SKILL_LINK" 2>/dev/null)" = "$REPO_DIR/skill" ] && run rm -f "$SKILL_LINK"
+  for nm in settings.json CLAUDE.md .credentials.json; do
+    [ -L "$HEADLESS_DIR/$nm" ] && run rm -f "$HEADLESS_DIR/$nm"
+  done
   if [ "${1:-}" = "--purge" ]; then
     echo "▸ --purge：連設定（含密鑰）、狀態、映像一起刪"
     for d in "${DATA_DIRS[@]}"; do run rm -rf "$d"; done
