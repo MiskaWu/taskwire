@@ -83,7 +83,7 @@
 | `bin/task-dispatch` `task-digest` `task-gc` | 由 systemd／webhookd 以絕對路徑呼叫，改即生效（gc 另有手動入口 `task gc`） | `bash -n` |
 | `bin/task-webhookd` | **quadlet 容器**（taskwire-webhook 映像，:9587；程式 COPY 進映像） | `py_compile` → `podman build -t taskwire-webhook:latest -f Containerfile.webhook .` → `systemctl --user restart task-webhook` |
 | `systemd/task-doorbell.path` `task-dispatch.service` | 門鈴信箱監看＋dispatch 的 unit 形（`task-scan.timer` 也指向後者） | `cp` → `daemon-reload` |
-| `bin/task-ui` `ui/index.html` | `task-ui.service` 常駐（127.0.0.1:9588） | `python3 -m py_compile` 後 `systemctl --user restart task-ui`；改頁面不用重啟 |
+| `bin/task-ui` `ui/`（React＋Vite） | `task-ui.service` 常駐（127.0.0.1:9588），伺服 `ui/dist` | 改後端：`py_compile` → restart；改前端：`cd ui && npm run build`（不用 restart）。設計稿見 artifact「taskwire 控制台」 |
 | `bin/taskwire-config.sh` `taskwire_config.py` | 被上面各支 source／import，改即生效 | `bash -n`／`py_compile` |
 | `bin/taskwire-install` | 檔案腳印的單一清單：install／status／uninstall（symlink、unit 複本、quadlet、skill link 一把管；uninstall 預設保留設定與狀態） | `bash -n`；要加腳印改腳本內的表 |
 | `systemd/*` | **複本**在 `~/.config/systemd/user/`，repo 是源 | `cp` 過去 → `daemon-reload` → restart／re-enable |

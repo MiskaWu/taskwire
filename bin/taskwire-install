@@ -81,6 +81,15 @@ cmd_install() {
     done
   fi
   [ "$changed" -eq 1 ] || [ "$DRY" -eq 1 ] && run systemctl --user daemon-reload
+  if [ ! -d "$REPO_DIR/ui/dist" ]; then
+    if command -v npm >/dev/null 2>&1; then
+      echo "▸ build 控制台前端（首次）"
+      run bash -c "cd '$REPO_DIR/ui' && npm install --no-audit --no-fund && npm run build" \
+        || echo "  ⚠ 前端 build 失敗——控制台會回 500 提示，之後手動 cd ui && npm run build"
+    else
+      echo "  ⚠ 沒有 npm：控制台前端沒 build，先裝 node 再 cd ui && npm run build"
+    fi
+  fi
   echo "▸ 啟用服務"
   run systemctl --user enable --now "${ENABLE_UNITS[@]}"
   # 門鈴：沒設密鑰時 ConditionPathExists 會讓 start 安靜跳過，這是設計。
@@ -134,6 +143,9 @@ cmd_status() {
     [ -f "$SYSD/task-webhook.service" ] && _row ok "直跑" "$SYSD/task-webhook.service" \
       || { _row 缺 "直跑" "$SYSD/task-webhook.service"; bad=1; }
   fi
+  echo "▸ 控制台前端"
+  [ -d "$REPO_DIR/ui/dist" ] && _row ok "ui/dist" "已 build" \
+    || { _row 缺 "ui/dist" "cd ui && npm install && npm run build"; bad=1; }
   echo "▸ 資料"
   for d in "${DATA_DIRS[@]}"; do [ -d "$d" ] && _row ok "$d" "" || _row 缺 "$d" ""; done
   [ -s "$HOME/.config/taskwire/webhook-secret" ] && _row ok "webhook-secret" "已設定" \
