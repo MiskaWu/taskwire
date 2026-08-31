@@ -1,0 +1,36 @@
+{
+  "_comment": "taskwire 無頭線專用 settings（P0，2026-08-28 拍板）。經 CLAUDE_CONFIG_DIR 載入，與互動用的 ~/.claude 完全分家。deny 規則的定位：字串比對擋不住敵意繞路，但擋『失誤』綽綽有餘——失誤不會變花樣，而失誤是無頭線現階段唯一機率不低的風險。真隔離（牢房）見 backlog 的沙箱單，條件觸發才啟動。（2026-08-28 使用者拍板：暫時放寬推送——git push 不在 deny 清單，推送行為交給 git-push-guard hook 判斷：主 checkout 可推、worktree 要該 repo 經 /allow-push 放行。要收回就把 Bash(git push:*) 加回 deny。）",
+  "permissions": {
+    "defaultMode": "auto",
+    "deny": [
+      "Bash(ssh:*)",
+      "Bash(scp:*)",
+      "Bash(sftp:*)",
+      "Bash(rsync:*)",
+      "Bash(aws:*)",
+      "Bash(gh pr create:*)",
+      "Read(~/.ssh/**)",
+      "Read(~/.aws/**)",
+      "Edit(~/.ssh/**)",
+      "Edit(~/.aws/**)"
+    ],
+    "allow": [
+      "Bash(git push:*)"
+    ]
+  },
+  "model": "claude-fable-5[1m]",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/python3 $HOME/.claude/hooks/git-push-guard.py",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}
