@@ -50,7 +50,14 @@ echo "=== dispatch $(date '+%F %T') ==="
 next_out=$(task next)
 echo "$next_out"
 iid=$(grep -oE '#[0-9]+' <<< "$next_out" | head -1 | tr -d '#') || true
-[ -n "${iid:-}" ] || { echo "沒有可接的單，收工。"; exit 0; }
+# 空手也要跑完 GC 再走：關單事件響的門鈴正是落在這條路——單子剛關、佇列也空了，
+# 回收要在這裡發生。掛在尾端的那次 GC 只涵蓋「有處理單」的路徑（#44 全鏈路
+# 實測抓到的縫，2026-08-28）。
+[ -n "${iid:-}" ] || {
+  echo "沒有可接的單。收尾照跑 GC。"
+  "$_TW_DIR/task-gc" || echo "GC 沒跑完（見上方輸出），不影響收工。"
+  exit 0
+}
 
 run_log="$STATE_DIR/run-$(date +%Y%m%d-%H%M%S)-$iid.log"
 echo "處理 #$iid，claude log → $run_log"
@@ -115,7 +122,7 @@ if [ -n "$repo_rel" ]; then
       exit 0
     fi
     cd "$src"
-    ws_hint="直接修模式（mode::direct）：你站在 ~/projects/$repo_rel 的主 checkout（進場前已確認乾淨），直接在目前分支上修，完成要 commit；不開 worktree、不推 origin。"
+    ws_hint="直接修模式（mode::direct）：你站在 ~/projects/$repo_rel 的主 checkout（進場前已確認乾淨），直接在目前分支上修，完成要 commit；不開 worktree。"
   elif [ -d "$src/.git" ]; then
     mkdir -p "$WT_ROOT"
     wt="$WT_ROOT/$iid"
@@ -144,7 +151,7 @@ if [ -n "$repo_rel" ]; then
       echo "worktree 重用：$wt"
     fi
     cd "$wt"
-    ws_hint="工作區已備好——你現在就站在這張單的 worktree（分支 task/$iid，源 repo ~/projects/$repo_rel${base_br:+，基準 $base_br}）。改動就在這裡做，完成要 commit；不推 origin（push guard 會擋，這是設計不是障礙）。"
+    ws_hint="工作區已備好——你現在就站在這張單的 worktree（分支 task/$iid，源 repo ~/projects/$repo_rel${base_br:+，基準 $base_br}）。改動就在這裡做，完成要 commit。commit 後可嘗試推工作分支 task/$iid（絕不推 main）；被 push-guard 擋下就停在 commit 狀態收尾回報，那是設計不是錯誤，不要繞過。"
   elif [ -d "$src" ]; then
     # 多 repo 工作區模式：站到目錄即可，內部判斷交給模型，但 worktree 位置是慣例。
     cd "$src"
@@ -153,9 +160,9 @@ if [ -n "$repo_rel" ]; then
         ws_hint="這是調查單（mode::read）：你站在多 repo 工作區 ~/projects/$repo_rel，只讀不改檔——不開 worktree、不 commit。交件是把調查結論寫回單上（task note／task done 的留言）。" ;;
       direct)
         # 多 repo 下守門守不了（不知道會動哪個 repo），乾淨檢查交給模型執行。
-        ws_hint="直接修模式（mode::direct）：你站在多 repo 工作區 ~/projects/$repo_rel，要動哪些內部 repo 由你判斷，直接修該 repo 的主 checkout——但動手前先確認該 repo 乾淨（git status），髒就 task block 不要碰；完成在目前分支 commit、不推 origin。" ;;
+        ws_hint="直接修模式（mode::direct）：你站在多 repo 工作區 ~/projects/$repo_rel，要動哪些內部 repo 由你判斷，直接修該 repo 的主 checkout——但動手前先確認該 repo 乾淨（git status），髒就 task block 不要碰；完成在目前分支 commit。" ;;
       *)
-        ws_hint="工作區是 ~/projects/$repo_rel——這是多 repo 的工作區目錄（本身不是 git repo），你已站在這裡。要動哪些內部 repo 由你依單上內容判斷。程式改動不要直接改各 repo 的主 checkout：在該 repo 開 worktree，位置固定 $WT_ROOT/$iid-<repo名>、分支 task/$iid，完成要 commit、不推 origin。位置慣例是 GC 對帳用的，別放別處。基準分支：${base_map:+單上指定了 $base_map；}沒指定的 repo 先 fetch、從它的遠端預設主線長出來。" ;;
+        ws_hint="工作區是 ~/projects/$repo_rel——這是多 repo 的工作區目錄（本身不是 git repo），你已站在這裡。要動哪些內部 repo 由你依單上內容判斷。程式改動不要直接改各 repo 的主 checkout：在該 repo 開 worktree，位置固定 $WT_ROOT/$iid-<repo名>、分支 task/$iid，完成要 commit；可嘗試推工作分支（絕不推 main），被 push-guard 擋下就停在 commit 收尾回報，不要繞過。位置慣例是 GC 對帳用的，別放別處。基準分支：${base_map:+單上指定了 $base_map；}沒指定的 repo 先 fetch、從它的遠端預設主線長出來。" ;;
     esac
   else
     task block "$iid" "工作區標籤 workspace::$repo_rel 指到的 ~/projects/$repo_rel 不存在。請重標：task ws $iid <路徑>。"
@@ -166,9 +173,9 @@ else
     read)
       ws_hint="這張單沒有標工作區（workspace:: 標籤），但標了 mode::read：調查單，只讀不改檔，該看哪裡由你判斷；交件是把結論寫回單上。判斷不出來就 task block 請使用者跑 task ws $iid <路徑>。" ;;
     direct)
-      ws_hint="這張單沒有標工作區（workspace:: 標籤），但標了 mode::direct：落在哪個 repo 由你判斷，直接修主 checkout——動手前先確認該 repo 乾淨（git status），髒就 task block 不要碰；完成 commit、不推 origin。判斷不出來就 task block 請使用者跑 task ws $iid <路徑>。" ;;
+      ws_hint="這張單沒有標工作區（workspace:: 標籤），但標了 mode::direct：落在哪個 repo 由你判斷，直接修主 checkout——動手前先確認該 repo 乾淨（git status），髒就 task block 不要碰；完成 commit。判斷不出來就 task block 請使用者跑 task ws $iid <路徑>。" ;;
     *)
-      ws_hint="這張單沒有標工作區（workspace:: 標籤）。由你判斷工作落在哪個 repo：cd 過去做，程式改動開 worktree、完成要 commit、不推 origin。判斷不出來就 task block 請使用者跑 task ws $iid <路徑> 標好工作區再觸發。" ;;
+      ws_hint="這張單沒有標工作區（workspace:: 標籤）。由你判斷工作落在哪個 repo：cd 過去做，程式改動開 worktree、完成要 commit（可嘗試推工作分支，被 push-guard 擋下就停在 commit 回報）。判斷不出來就 task block 請使用者跑 task ws $iid <路徑> 標好工作區再觸發。" ;;
   esac
 fi
 
@@ -188,6 +195,13 @@ prompt=$(cat <<PROMPT
 6. 邊界：不關單、不動其他單的狀態、不碰 todo 的拉入。
 PROMPT
 )
+
+# P0（2026-08-28 拍板）：無頭專用的 Claude 設定目錄，與互動的 ~/.claude 分家——
+# settings（含 deny 規則）、記憶、對話各自獨立；憑證是 symlink 共用同一份
+# （OAuth refresh 可能輪替 token，兩份獨立副本會互相踩死，所以連結不複製）。
+# 目錄由 taskwire-install 建置。要翻無頭的對話：
+#   CLAUDE_CONFIG_DIR=~/.config/taskwire/headless-claude claude --resume
+export CLAUDE_CONFIG_DIR="$HOME/.config/taskwire/headless-claude"
 
 rc=0
 TASK_HEADLESS=1 timeout "$TIMEOUT" \
