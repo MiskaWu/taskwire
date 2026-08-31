@@ -38,7 +38,7 @@ export default function App() {
         <div className="brand">
           <Dot c={allUp ? '#5ed99a' : '#f0c060'} />
           <div>
-            <div className="name">taskwire</div>
+            <div className="name">TaskWire</div>
             <div className="sub">控制台</div>
           </div>
         </div>
