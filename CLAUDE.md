@@ -54,9 +54,10 @@
    頁面上擺一顆關單按鈕，等於從內部把這份一致性拆掉。
 9. **設定的單一真相是 `~/.config/taskwire/config.env`**（2026-08-28）。
    優先序**環境變數 > config.env > 腳本內建預設**，bash 端（`taskwire-config.sh`）
-   與 python 端（`taskwire_config.py`）兩份實作必須同義——分岔的話控制台顯示的
-   就不是腳本真正在用的值，那比沒有控制台更糟。加新旋鈕只改 `taskwire_config.py`
-   的 `SETTINGS`，網頁表單會自己長出來，不要在頁面上手寫欄位。
+   與 Go 端（`internal/config/config.go`，2026-08-31 取代原 python 端）兩份實作
+   必須同義——分岔的話控制台顯示的就不是腳本真正在用的值，那比沒有控制台更糟。
+   加新旋鈕只改 `config.go` 的 `Settings`（改完 `make backend` → restart），
+   網頁表單會自己長出來，不要在頁面上手寫欄位。
 
 ## 早報（雲端 routine）與 taskwire 的邊界（2026-08-28 收尾）
 
@@ -81,10 +82,10 @@
 |---|---|---|
 | `bin/task` `task-notify` | symlink 進 `~/.local/bin/`，改即生效 | `bash -n` 檢查 |
 | `bin/task-dispatch` `task-digest` `task-gc` | 由 systemd／webhookd 以絕對路徑呼叫，改即生效（gc 另有手動入口 `task gc`） | `bash -n` |
-| `bin/task-webhookd` | **quadlet 容器**（taskwire-webhook 映像，:9587；程式 COPY 進映像） | `py_compile` → `podman build -t taskwire-webhook:latest -f Containerfile.webhook .` → `systemctl --user restart task-webhook` |
+| `cmd/task-webhookd/`（Go） | **quadlet 容器**（taskwire-webhook 映像，:9587；映像內多階段編譯進 scratch，宿主機直跑版用 `make backend` 產的 `bin/task-webhookd`） | `podman build -t taskwire-webhook:latest -f Containerfile.webhook .` → `systemctl --user restart task-webhook` |
 | `systemd/task-doorbell.path` `task-dispatch.service` | 門鈴信箱監看＋dispatch 的 unit 形（`task-scan.timer` 也指向後者） | `cp` → `daemon-reload` |
-| `bin/task-ui` `ui/`（React＋Vite） | `task-ui.service` 常駐（127.0.0.1:9588），伺服 `ui/dist` | 改後端：`py_compile` → restart；改前端：`cd ui && npm run build`（不用 restart）。設計稿見 artifact「taskwire 控制台」 |
-| `bin/taskwire-config.sh` `taskwire_config.py` | 被上面各支 source／import，改即生效 | `bash -n`／`py_compile` |
+| `cmd/task-ui/`（Go）＋`ui/`（React 19＋TS＋Vite） | `task-ui.service` 常駐（127.0.0.1:9588）；前端經 vite-plugin-singlefile 產單檔、`go:embed` 嵌進 `bin/task-ui` 執行檔 | 前後端都是 `make` → `systemctl --user restart task-ui`（2026-08-31 起改前端也要重編重啟——產物在執行檔裡）。設計稿見 artifact「taskwire 控制台」 |
+| `bin/taskwire-config.sh` `internal/config/`（Go） | bash 版被各腳本 source 改即生效；Go 版編進兩支執行檔 | `bash -n`／改 Go 要 `make backend` → restart |
 | `bin/taskwire-install` | 檔案腳印的單一清單：install／status／uninstall（symlink、unit 複本、quadlet、skill link 一把管；uninstall 預設保留設定與狀態） | `bash -n`；要加腳印改腳本內的表 |
 | `systemd/*` | **複本**在 `~/.config/systemd/user/`，repo 是源 | `cp` 過去 → `daemon-reload` → restart／re-enable |
 | `skill/SKILL.md` | symlink 於 `~/.claude/skills/taskwire`，改即生效 | — |

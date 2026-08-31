@@ -81,13 +81,16 @@ cmd_install() {
     done
   fi
   [ "$changed" -eq 1 ] || [ "$DRY" -eq 1 ] && run systemctl --user daemon-reload
-  if [ ! -d "$REPO_DIR/ui/dist" ]; then
-    if command -v npm >/dev/null 2>&1; then
-      echo "▸ build 控制台前端（首次）"
-      run bash -c "cd '$REPO_DIR/ui' && npm install --no-audit --no-fund && npm run build" \
-        || echo "  ⚠ 前端 build 失敗——控制台會回 500 提示，之後手動 cd ui && npm run build"
+  # 執行檔是 build 產物、不進版控（2026-08-31 改寫成 Go 之後）：缺哪支就補 build。
+  # 前端 build 在 go build 之前——task-ui 用 go:embed 把 dist 包進執行檔。
+  if [ ! -x "$REPO_DIR/bin/task-ui" ] || [ ! -x "$REPO_DIR/bin/task-webhookd" ]; then
+    if command -v go >/dev/null 2>&1 && command -v npm >/dev/null 2>&1; then
+      echo "▸ build 執行檔（首次）"
+      run bash -c "cd '$REPO_DIR/ui' && npm install --no-audit --no-fund" \
+        && run make -C "$REPO_DIR" \
+        || echo "  ⚠ build 失敗——控制台起不來，之後手動在 repo 跑 make"
     else
-      echo "  ⚠ 沒有 npm：控制台前端沒 build，先裝 node 再 cd ui && npm run build"
+      echo "  ⚠ 缺 go 或 npm：執行檔沒 build，裝好之後在 repo 跑 make"
     fi
   fi
   echo "▸ 啟用服務"
@@ -143,9 +146,11 @@ cmd_status() {
     [ -f "$SYSD/task-webhook.service" ] && _row ok "直跑" "$SYSD/task-webhook.service" \
       || { _row 缺 "直跑" "$SYSD/task-webhook.service"; bad=1; }
   fi
-  echo "▸ 控制台前端"
-  [ -d "$REPO_DIR/ui/dist" ] && _row ok "ui/dist" "已 build" \
-    || { _row 缺 "ui/dist" "cd ui && npm install && npm run build"; bad=1; }
+  echo "▸ 執行檔（build 產物，不進版控）"
+  for b in task-ui task-webhookd; do
+    [ -x "$REPO_DIR/bin/$b" ] && _row ok "bin/$b" "已 build" \
+      || { _row 缺 "bin/$b" "在 repo 跑 make"; bad=1; }
+  done
   echo "▸ 資料"
   for d in "${DATA_DIRS[@]}"; do [ -d "$d" ] && _row ok "$d" "" || _row 缺 "$d" ""; done
   [ -s "$HOME/.config/taskwire/webhook-secret" ] && _row ok "webhook-secret" "已設定" \
