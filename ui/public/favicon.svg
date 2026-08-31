@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- 一條線（wire）穿過一顆打勾的節點（task）——貼著控制台的深底綠 accent -->
+  <rect width="64" height="64" rx="14" fill="#131a26"/>
+  <path d="M4 32h13M47 32h13" stroke="#3d4b63" stroke-width="5" stroke-linecap="round"/>
+  <circle cx="32" cy="32" r="15" fill="#131a26" stroke="#5ed99a" stroke-width="5"/>
+  <path d="M25.5 32.5l4.5 4.5 8.5-9.5" stroke="#5ed99a" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+</svg>
