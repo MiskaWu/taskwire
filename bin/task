@@ -492,4 +492,7 @@ main() {
   esac
 }
 
-main "$@"
+# 被 source 時（test/task-state-test.sh）只載入函式、不執行指令。
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi
