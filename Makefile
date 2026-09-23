@@ -5,7 +5,7 @@
 #
 # 改前端後：make（三步：npm build → go build → 自己 restart task-ui）。
 # 只改 Go：make backend。
-.PHONY: all frontend backend
+.PHONY: all frontend backend test
 
 all: frontend backend
 
@@ -15,3 +15,7 @@ frontend:
 backend:
 	go build -o bin/task-ui ./cmd/task-ui
 	go build -o bin/task-webhookd ./cmd/task-webhookd
+
+# bin/task 的狀態判斷測試（離線，用假的 glab）。改 bin/task 後、commit 前跑。
+test:
+	bash test/task-state-test.sh
