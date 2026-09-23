@@ -91,6 +91,20 @@ _fmt() {
   return 0
 }
 
+# 單子在流程裡的位置（stdin：glab issue view 的 JSON）→ closed|doing|done|todo|blocked|inbox。
+# 關閉優先於標籤：關單＝使用者驗收完成（或放棄），是流程終點，而關掉的單可能還掛著舊標籤。
+# 只看標籤的話，已關閉又沒標籤的單會被說成「還在收集箱」，掛著 todo 的甚至會被 start 接走。
+# 標籤之間的先後沿用原本 start 的判斷：doing > done > todo／blocked。
+_position() {
+  jq -r 'if .state == "closed" then "closed"
+         else ([.labels[]?] as $l
+           | if   ($l | index("doing"))   then "doing"
+             elif ($l | index("done"))    then "done"
+             elif ($l | index("todo"))    then "todo"
+             elif ($l | index("blocked")) then "blocked"
+             else "inbox" end) end'
+}
+
 # 代理寫的留言一律帶標記——同一個 GitLab 帳號分不出作者，標記是機械加的，
 # 不靠任何人記得。使用者自己的留言走網頁或裸 glab，不會有這個前綴。
 _note() {
@@ -232,14 +246,14 @@ cmd_new() {
 cmd_start() {
   local iid="$1" summary="$2"
   [ -n "$summary" ] || die '要給開工摘要：task start <iid> "開工摘要"'
-  local vj labels
+  local vj
   vj=$(_glab_json issue view "$iid" -R "$REPO" --output json)
-  labels=$(jq -r '[.labels[]?] | join(" ")' <<< "$vj")
-  case " $labels " in
-    *" doing "*)  die "#$iid 已經在 doing。" ;;
-    *" done "*)   die "#$iid 在等驗收，不重開。使用者驗完會關單或退回。" ;;
-    *" todo "*|*" blocked "*) : ;;
-    *) die "#$iid 還在收集箱。授權是使用者的動作：先由使用者拉 todo（glab issue update $iid --label todo -R $REPO）。" ;;
+  case "$(_position <<< "$vj")" in
+    closed)       die "#$iid 已經關閉（使用者驗收完成或放棄），不接。要重做請使用者重開，或另開新單。" ;;
+    doing)        die "#$iid 已經在 doing。" ;;
+    done)         die "#$iid 在等驗收，不重開。使用者驗完會關單或退回。" ;;
+    todo|blocked) : ;;
+    *)            die "#$iid 還在收集箱。授權是使用者的動作：先由使用者拉 todo（glab issue update $iid --label todo -R $REPO）。" ;;
   esac
   _note "$iid" "上工：$summary" >/dev/null
   _set_state "$iid" doing
