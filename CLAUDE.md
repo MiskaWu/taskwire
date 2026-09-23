@@ -104,6 +104,11 @@ timers：`task-scan.timer` 每小時對帳、`task-digest.timer` 每天 09:00 �
 
 ## 驗證手段
 
+**改 `bin/task` 後、commit 前跑 `make test`**（`test/task-state-test.sh`）：source 腳本取得函式，
+用假的 `glab` 離線驗證 `_position`，以及 start／block／done 對已關閉的單一律拒絕且沒有任何寫入、
+還開著的單照原規則轉移。`bin/task` 結尾因此只在直接執行時才跑 `main`，被 source 時只載入函式——
+別把那個判斷拿掉。新增狀態相關的規則時，在這支測試補案例（含反向案例）。
+
 控制台 <http://127.0.0.1:9588/>（doctor、門鈴健康、服務與排程、log、單況都在同一頁）。
 指令列：`task doctor`（API／身分／token 到期／無頭憑證／標籤）、
 `curl -s http://127.0.0.1:9587/healthz`、`journalctl --user -u task-webhook -n 20`、
