@@ -105,6 +105,15 @@ _position() {
              else "inbox" end) end'
 }
 
+# 已關閉的單，start／block／done 一律不動：關單是使用者的終點動作，關掉的單再貼 doing／blocked／done、
+# 再發「卡住」「待驗收」通知都是錯的。三處共用同一句，免得各說各話。
+_die_closed() { die "#$1 已經關閉（使用者驗收完成或放棄），不$2。要重做請使用者重開，或另開新單。"; }
+_refuse_closed() { # $1=iid $2=動作名
+  local vj
+  vj=$(_glab_json issue view "$1" -R "$REPO" --output json)
+  [ "$(_position <<< "$vj")" != closed ] || _die_closed "$1" "$2"
+}
+
 # 代理寫的留言一律帶標記——同一個 GitLab 帳號分不出作者，標記是機械加的，
 # 不靠任何人記得。使用者自己的留言走網頁或裸 glab，不會有這個前綴。
 _note() {
@@ -249,7 +258,7 @@ cmd_start() {
   local vj
   vj=$(_glab_json issue view "$iid" -R "$REPO" --output json)
   case "$(_position <<< "$vj")" in
-    closed)       die "#$iid 已經關閉（使用者驗收完成或放棄），不接。要重做請使用者重開，或另開新單。" ;;
+    closed)       _die_closed "$iid" 接 ;;
     doing)        die "#$iid 已經在 doing。" ;;
     done)         die "#$iid 在等驗收，不重開。使用者驗完會關單或退回。" ;;
     todo|blocked) : ;;
@@ -461,11 +470,13 @@ main() {
     start)          _need_iid "${1:-}" start; cmd_start "$1" "${2:-}" ;;
     block)          _need_iid "${1:-}" block
                     [ -n "${2:-}" ] || die '要寫清楚卡在哪：task block <iid> "問題"'
+                    _refuse_closed "$1" 標卡住
                     _note "$1" "$2" >/dev/null
                     _set_state "$1" blocked
                     task-notify -d -t 球權 "🔴 #$1 卡住等回話——$2" >/dev/null 2>&1 || true ;;
     done)           _need_iid "${1:-}" done
                     [ -n "${2:-}" ] || die '要給交件摘要：task done <iid> "摘要"'
+                    _refuse_closed "$1" 交件
                     _note "$1" "$2" >/dev/null
                     _set_state "$1" done
                     task-notify -d -t 球權 "🟣 #$1 做完待驗收——$2" >/dev/null 2>&1 || true ;;
