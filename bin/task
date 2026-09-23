@@ -162,8 +162,12 @@ task —— backlog 的指令列入口（v2）
 ──────────────────────────────────────────────────────────
 這兩件是你的動作，這支腳本刻意沒有對應指令：
 
-  拉 todo（授權）  glab issue update <iid> --label todo
-  關單（驗收）     glab issue close <iid>
+HELP
+  # 印出實際在用的 $REPO（可被 TASK_REPO／config.env 覆寫），照抄就能在任何目錄執行。
+  # -R 必須帶主機名：只給 <group>/<repo> 的話 glab 會打 gitlab.com，回 404。
+  printf '  拉 todo（授權）  glab issue update <iid> --label todo -R %s\n' "$REPO"
+  printf '  關單（驗收）     glab issue close <iid> -R %s\n' "$REPO"
+  cat <<'HELP'
 
 blocked 的單在你回話之後由我用 task start 接續（你的回話就是放行）。
 指令的缺席就是「這個動作不歸代理」的文件。要改這條規則就改設計，不要繞過腳本。
@@ -235,7 +239,7 @@ cmd_start() {
     *" doing "*)  die "#$iid 已經在 doing。" ;;
     *" done "*)   die "#$iid 在等驗收，不重開。使用者驗完會關單或退回。" ;;
     *" todo "*|*" blocked "*) : ;;
-    *) die "#$iid 還在收集箱。授權是使用者的動作：先由使用者拉 todo（glab issue update $iid --label todo）。" ;;
+    *) die "#$iid 還在收集箱。授權是使用者的動作：先由使用者拉 todo（glab issue update $iid --label todo -R $REPO）。" ;;
   esac
   _note "$iid" "上工：$summary" >/dev/null
   _set_state "$iid" doing
