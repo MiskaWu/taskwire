@@ -19,6 +19,8 @@
 #     不要在沒有新拍板的情況下把閘門加回來。
 #   - 查詢失敗必須長得不像空清單。所有 glab 呼叫都檢查 exit code——
 #     token 過期的那天，`task mine` 要說「連不上」，不能說「沒有待辦」。
+#   - 部分結果也不能長得像全部。清單查詢一律走 `_glab_json_all` 逐頁取完；
+#     show 另外拿 user_notes_count 對帳，留言數對不上就大聲失敗（2026-10-14）。
 #
 # 相依：glab（認證見專案記憶 gitlab-ssh-push-options）、jq。兩者都由 dev-env-ansible 管。
 # 健康檢查刻意不用 `glab auth status` —— 它對細粒度 token 必定誤報 Invalid token，
@@ -64,8 +66,25 @@ _glab_json() {
   printf '%s' "$out"
 }
 
+# 清單查詢一律走這裡，逐頁取到不滿一頁為止。glab 每次只回一頁（issue list 預設 30、
+# 留言預設 20），只拿第一頁就是把「部分」當「全部」——跟「查詢失敗長得像空清單」同一類錯，
+# 而且更難發現：#71 的留言超過 20 則時，task show 少了最後兩則卻沒有任何提示（2026-10-14）。
+# `|| exit 1` 不能省：呼叫端是 `x=$(_glab_json_all ...)`，命令替換的子 shell 不繼承 set -e。
+_PAGE=100
+_glab_json_all() {
+  local page=1 out pages=""
+  while :; do
+    out=$(_glab_json "$@" --output json -P "$_PAGE" -p "$page") || exit 1
+    pages+="$out"$'\n'
+    [ "$(jq 'length' <<< "$out")" -lt "$_PAGE" ] && break
+    page=$((page + 1))
+    [ "$page" -le 50 ] || die "分頁取到第 50 頁還沒結束，停下來（不是空清單，是查詢沒有收斂）"
+  done
+  jq -s 'add // []' <<< "$pages"
+}
+
 # 一次抓全部 open 的單，各指令用 jq 在本地切分——省 API 往返，也讓計數一致。
-_all_open() { _glab_json issue list -R "$REPO" --output json -P 100; }
+_all_open() { _glab_json_all issue list -R "$REPO"; }
 
 _by_label() { jq --arg l "$1" '[.[] | select(.labels | index($l))]'; }
 
@@ -234,11 +253,40 @@ cmd_next() {
   printf '沒有可接的單。doing 與 todo 都是空的。\n'
 }
 
+# show —— 單子本文＋全部留言。留言逐頁取完，再拿單上的 user_notes_count 對帳：
+# 對不上就大聲失敗，不印一份看起來完整、其實缺頁的單（無頭線靠 task show 理解 why 與驗收條件）。
+# 輸出照 glab issue view --comments 的文字格式；系統訊息（標籤變更、被提及）跟 glab 一樣不列。
+cmd_show() {
+  local iid="$1" page=1 out first="" pages="" notes got total
+  while :; do
+    out=$(_glab_json issue view "$iid" -R "$REPO" --comments --output json -P "$_PAGE" -p "$page") || exit 1
+    [ -n "$first" ] || first="$out"
+    pages+="$(jq '.Notes // []' <<< "$out")"$'\n'
+    [ "$(jq '(.Notes // []) | length' <<< "$out")" -lt "$_PAGE" ] && break
+    page=$((page + 1))
+    [ "$page" -le 50 ] || die "#$iid 的留言取到第 50 頁還沒結束，停下來"
+  done
+  notes=$(jq -s 'add | unique_by(.id) | map(select(.system | not)) | sort_by(.created_at)' <<< "$pages")
+  got=$(jq 'length' <<< "$notes")
+  total=$(jq '.user_notes_count // 0' <<< "$first")
+  [ "$got" -eq "$total" ] || die "#$iid 的留言沒取齊：單上有 $total 則，只拿到 $got 則（這不是全部，別照這份判斷）"
+  jq -r '"title:\t\(.title)",
+         "state:\t\(if .state == "opened" then "open" else .state end)",
+         "author:\t\(.author.username)",
+         "labels:\t\(.labels | join(", "))",
+         "comments:\t\(.user_notes_count)",
+         "assignees:\t\([.assignees[]?.username] | join(", "))",
+         "--", (.description // ""), ""' <<< "$first"
+  [ "$got" -gt 0 ] || return 0
+  printf -- '--\ncomments/notes:\n\n'
+  jq -r '.[] | "\(.author.username) commented \(.created_at | sub("\\.[0-9]+"; "") | sub("T"; " ") | sub("Z$"; " UTC"))\n\(.body)\n"' <<< "$notes"
+}
+
 cmd_new() {
   local title="${1:-}" desc="${2:-}"
   [ -n "$title" ] || die '要給標題，例：task new "修好 X"'
   local hit
-  hit=$(_glab_json issue list -R "$REPO" --all --search "$title" --output json \
+  hit=$(_glab_json_all issue list -R "$REPO" --all --search "$title" \
         | jq -r --arg t "$title" '[.[] | select(.title == $t)] | .[0].web_url // empty')
   if [ -n "$hit" ]; then
     printf '已經有同名的單，不重建：\n%s\n' "$hit"
@@ -465,7 +513,7 @@ main() {
     # `done <iid> "摘要"` 交件分支整個遮掉（#31 無頭取件實際踩到）。done 的清單看 task ball。
     todo|doing|blocked)
                     printf '\n%s\n' "$cmd"; _all_open | _by_label "$cmd" | _fmt; printf '\n' ;;
-    show)           _need_iid "${1:-}" show; glab issue view "$1" -R "$REPO" --comments ;;
+    show)           _need_iid "${1:-}" show; cmd_show "$1" ;;
     new)            cmd_new "${1:-}" "${2:-}" ;;
     start)          _need_iid "${1:-}" start; cmd_start "$1" "${2:-}" ;;
     block)          _need_iid "${1:-}" block

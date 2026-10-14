@@ -15,6 +15,9 @@
    也不要繞過腳本直接下 glab 動這兩件事。worktree 不推 origin（**2026-08-28 使用者暫時放寬**：無頭線 settings 的 push deny 已移除，推送交給 git-push-guard——主 checkout 可推、worktree 要 /allow-push 放行；收回＝把 `Bash(git push:*)` 加回 headless/settings.json 的 deny）；token 輪替不由代理觸發。
 3. **查詢失敗必須長得不像空清單**。所有拿 JSON 的 glab 呼叫走 `_glab_json`，
    別繞過它——token 過期那天 `task mine` 要說「連不上」，不能說「沒有待辦」。
+   **部分結果也不能長得像全部**（2026-10-14）：清單查詢走 `_glab_json_all` 逐頁取完，
+   `task show` 另拿 `user_notes_count` 對帳。起因是 glab 一次只回一頁（留言 20、清單 30），
+   #71 留言超過 20 則時 show 少了兩則卻毫無提示。
 4. **webhook 是門鈴，不是資料來源**。payload 不進決策；dispatch 是 level-triggered，
    每次醒來用 `task next` 重讀完整真實狀態。K8s reconcile 的形：標籤=期望狀態、
    dispatch=controller、webhook=提早叫醒、`task-scan.timer`=periodic resync。
