@@ -73,6 +73,17 @@ var Settings = []Setting{
 		Restart: []string{},
 	},
 	{
+		Key:     "GLAB_CONFIG_DIR",
+		Label:   "glab 設定資料夾（用哪支 token）",
+		Default: "",
+		Type:    "text",
+		Help: "task、task-notify、task-digest 與控制台呼叫 glab 時讀的設定資料夾，等於選哪一支 GitLab token。" +
+			"留空＝glab 預設（~/.config/glab-cli）。建議指到只開 backlogs 權限的那支（例如 " +
+			"/home/<你>/.config/glab-cli-issues），預設的 glab 就能放別的用途的 token。" +
+			"**寫絕對路徑**——設定檔不做 ~ 展開。",
+		Restart: []string{},
+	},
+	{
 		Key:     "TASK_DISPATCH_TIMEOUT",
 		Label:   "無頭取件逾時（秒）",
 		Default: "3600",

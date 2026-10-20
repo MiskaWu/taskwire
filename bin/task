@@ -23,6 +23,8 @@
 #     show 另外拿 user_notes_count 對帳，留言數對不上就大聲失敗（2026-10-14）。
 #
 # 相依：glab（認證見專案記憶 gitlab-ssh-push-options）、jq。兩者都由 dev-env-ansible 管。
+# 用哪支 token 由 config.env 的 GLAB_CONFIG_DIR 決定（taskwire-config.sh 匯出）：指到只能寫
+# backlogs 的那支小 token，預設的 glab 就能放別的用途的 token。留空＝glab 預設資料夾。
 # 健康檢查刻意不用 `glab auth status` —— 它對細粒度 token 必定誤報 Invalid token，
 # 見 `task doctor` 的註解。
 
@@ -47,6 +49,12 @@ AGENT_LABELS=(doing blocked done)
 die() { printf '錯誤：%s\n' "$1" >&2; exit 1; }
 
 _need_iid() { [[ "${1:-}" =~ ^[0-9]+$ ]] || die "要給 issue 編號，例：task $2 5"; }
+
+# 印給使用者照抄的 glab 指令，要用跟這支腳本同一支 token：設了 GLAB_CONFIG_DIR 就寫進指令開頭。
+# 不帶的話，使用者在自己的終端機照打會用到預設 glab 那支——它可能沒有 backlogs 的寫入權。
+_user_glab() {
+  if [ -n "${GLAB_CONFIG_DIR:-}" ]; then printf 'GLAB_CONFIG_DIR=%s glab' "$GLAB_CONFIG_DIR"; else printf 'glab'; fi
+}
 
 # 所有拿 JSON 的 glab 呼叫走這裡：exit code 非零或回的不是 JSON 都大聲失敗。
 # 在 `j=$(_glab_json ...)` 的呼叫形式下，這裡的 exit 1 會讓上層的賦值失敗，
@@ -207,8 +215,8 @@ task —— backlog 的指令列入口（v2）
 HELP
   # 印出實際在用的 $REPO（可被 TASK_REPO／config.env 覆寫），照抄就能在任何目錄執行。
   # -R 必須帶主機名：只給 <group>/<repo> 的話 glab 會打 gitlab.com，回 404。
-  printf '  拉 todo（授權）  glab issue update <iid> --label todo -R %s\n' "$REPO"
-  printf '  關單（驗收）     glab issue close <iid> -R %s\n' "$REPO"
+  printf '  拉 todo（授權）  %s issue update <iid> --label todo -R %s\n' "$(_user_glab)" "$REPO"
+  printf '  關單（驗收）     %s issue close <iid> -R %s\n' "$(_user_glab)" "$REPO"
   cat <<'HELP'
 
 blocked 的單在你回話之後由我用 task start 接續（你的回話就是放行）。
@@ -310,7 +318,7 @@ cmd_start() {
     doing)        die "#$iid 已經在 doing。" ;;
     done)         die "#$iid 在等驗收，不重開。使用者驗完會關單或退回。" ;;
     todo|blocked) : ;;
-    *)            die "#$iid 還在收集箱。授權是使用者的動作：先由使用者拉 todo（glab issue update $iid --label todo -R $REPO）。" ;;
+    *)            die "#$iid 還在收集箱。授權是使用者的動作：先由使用者拉 todo（$(_user_glab) issue update $iid --label todo -R $REPO）。" ;;
   esac
   _note "$iid" "上工：$summary" >/dev/null
   _set_state "$iid" doing
