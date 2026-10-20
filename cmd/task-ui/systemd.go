@@ -75,13 +75,23 @@ func unitByName(name string) *unitDef {
 	return nil
 }
 
+// glabEnv 讓子程序裡的 glab 跟 task 系列用同一支 token：從設定讀 GLAB_CONFIG_DIR 帶下去。
+// 不寫進控制台自己的行程環境——那樣設定頁會把這顆旋鈕的來源誤報成「環境變數」。
+// 每次呼叫現讀，改完設定下一次就生效，不必重啟控制台（與 bash 端一致）。
+func glabEnv() []string {
+	if dir := config.Effective()["GLAB_CONFIG_DIR"]; dir != "" {
+		return []string{"GLAB_CONFIG_DIR=" + dir}
+	}
+	return nil
+}
+
 // run 跑一個外部指令，回 (rc, 合併輸出)。永遠不回 error——
 // 控制台的每一格都可能失敗，失敗要變成畫面上的一段紅字，不是 500。
 func run(timeout time.Duration, extraEnv []string, name string, args ...string) (int, string) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, name, args...)
-	cmd.Env = append(os.Environ(), extraEnv...)
+	cmd.Env = append(append(os.Environ(), glabEnv()...), extraEnv...)
 	out, err := cmd.CombinedOutput()
 	text := strings.TrimSpace(string(out))
 	if ctx.Err() == context.DeadlineExceeded {

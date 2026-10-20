@@ -32,7 +32,7 @@ Volume=%h/projects/taskwire:%h/projects/taskwire:rw
 Volume=/etc/localtime:/etc/localtime:ro
 
 # —— 貴的那半：每一行都是交出去的一塊宿主機能力 ——
-# 查單況（含 GitLab token）
+# 查單況（含 GitLab token）。config.env 設了 GLAB_CONFIG_DIR 的話，掛的要是那個資料夾，不是這個預設的。
 Volume=%h/.config/glab-cli:%h/.config/glab-cli:ro
 # 寫排程 drop-in
 Volume=%h/.config/systemd/user:%h/.config/systemd/user:rw
